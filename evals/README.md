@@ -25,7 +25,12 @@ UV_PROJECT_ENVIRONMENT=$PWD/evals/.run/hermes-venv \
 chmod 600 evals/.env
 ```
 
-The first `run.py` also builds a shared PDF venv at `evals/.run/pdf-venv`.
+The first `run.py` also builds a shared PDF venv at `evals/.run/pdf-venv` and a
+`python3` shim at `evals/.run/bin`. Hermes deliberately strips `EXA_API_KEY` from
+the terminal sandbox (and refuses `terminal.env_passthrough` for it), so the shim
+exports only that key, read from the mode-600 `evals/.env`, before exec'ing the
+system Python. This mirrors a VPS where the key is exported; the key is never
+written into the shim.
 
 ## Run
 

@@ -44,6 +44,7 @@ VARIANTS_DIR = RUN_DIR / "skills"
 HERMES_VENV = RUN_DIR / "hermes-venv"
 HERMES_BIN = HERMES_VENV / "bin" / "hermes"
 PDF_VENV = RUN_DIR / "pdf-venv"
+SHIM_DIR = RUN_DIR / "bin"
 
 MODEL = "deepseek-v4.1-flash"
 PROVIDER = "opencode-go"
@@ -166,6 +167,28 @@ def ensure_hermes() -> None:
             f"  ls {RUN_DIR / 'hermes-src'} || git clone --depth 1 https://github.com/NousResearch/hermes-agent {RUN_DIR / 'hermes-src'}\n"
             f"  UV_PROJECT_ENVIRONMENT=$PWD/{HERMES_VENV.relative_to(ROOT)} uv sync --project {RUN_DIR / 'hermes-src'} --no-dev"
         )
+
+
+def ensure_python_shim() -> None:
+    """Give the eval's `python3` the Exa key.
+
+    Hermes deliberately strips EXA_API_KEY (a provider credential) from the
+    terminal sandbox, and refuses `terminal.env_passthrough` for it. A real VPS
+    runs research.py with the key exported, so the harness prepends one wrapper
+    that reads only that key from the gitignored `evals/.env`. The key is never
+    written into the shim or printed.
+    """
+    SHIM_DIR.mkdir(parents=True, exist_ok=True)
+    shim = SHIM_DIR / "python3"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "# Harness shim: expose only EXA_API_KEY, which Hermes blocks from the terminal sandbox.\n"
+        f"EXA_API_KEY=\"$(sed -n 's/^EXA_API_KEY=//p' {ENV_FILE} | head -n 1)\"\n"
+        "export EXA_API_KEY\n"
+        "exec /usr/bin/python3 \"$@\"\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o700)
 
 
 def ensure_pdf_venv() -> None:
@@ -310,7 +333,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     env.update({
         "HOME": str(child_home),
         "HERMES_HOME": str(hermes_home),
-        "PATH": f"{HERMES_VENV / 'bin'}{os.pathsep}{env.get('PATH', '')}",
+        "PATH": f"{SHIM_DIR}{os.pathsep}{HERMES_VENV / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         "HERMES_DEEP_RESEARCH_VENV": str(PDF_VENV),
         "DEEP_RESEARCH_NUM_RESULTS": str(num_results),
     })
@@ -364,11 +387,16 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
 # stats collection
 # --------------------------------------------------------------------------
 
+BOX_CHARS = ("│", "┌", "└", "├", "─", "╭", "╰", "╮", "╯")
+
+
 def read_reply(path: Path) -> str:
-    """The final response is the only thing -Q writes to stdout."""
+    """Final response from stdout, minus the gateway's boxed tool previews."""
     if not path.is_file():
         return ""
-    return path.read_text(encoding="utf-8", errors="replace").strip()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    kept = [line for line in lines if not line.lstrip().startswith(BOX_CHARS)]
+    return "\n".join(kept).strip()
 
 
 def pick_work_dir(child_home: Path) -> Path | None:
@@ -386,6 +414,10 @@ def pick_work_dir(child_home: Path) -> Path | None:
         return ((path / "plan.json").is_file(), findings, sources, path.stat().st_mtime)
     dirs = [path for path in root.iterdir() if path.is_dir()]
     return max(dirs, key=score) if dirs else None
+
+
+def one_line(text) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
 def read_json(path: Path, default):
@@ -594,14 +626,15 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
     for sid, ref in citation_map.items():
         src = by_id.get(sid) or {}
         cited.append({
-            "ref": int(ref), "id": sid, "title": src.get("title") or "",
+            "ref": int(ref), "id": sid, "title": one_line(src.get("title")),
             "url": src.get("url") or "", "subquestions": src.get("subquestions") or [],
         })
     cited.sort(key=lambda item: item["ref"])
 
-    uncached = max(0, usage["input"] - usage["cache_read"])
+    # Hermes stores non-cached input in input_tokens and cached prompt tokens
+    # separately in cache_read_tokens (their sum is the provider prompt_tokens).
     llm_cost = (
-        uncached * PRICE_INPUT
+        usage["input"] * PRICE_INPUT
         + usage["cache_read"] * PRICE_CACHED
         + (usage["output"] + usage["cache_write"]) * PRICE_OUTPUT
     ) / 1_000_000
@@ -665,7 +698,8 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "llm_tokens": {
             "input": usage["input"], "output": usage["output"],
             "cache_read": usage["cache_read"], "cache_write": usage["cache_write"],
-            "total": usage["input"] + usage["output"],
+            "input_total": usage["input"] + usage["cache_read"],
+            "total": usage["input"] + usage["cache_read"] + usage["output"],
             "api_calls": usage["api_calls"], "usage_rows": usage["usage_rows"],
         },
         "llm_cost_usd": round(llm_cost, 6),
@@ -682,12 +716,12 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "delegate_task_calls": delegate_calls,
         "tool_calls": tool_counts,
         "sources_found": [
-            {"id": src.get("id"), "title": src.get("title") or "", "url": src.get("url") or "",
+            {"id": src.get("id"), "title": one_line(src.get("title")), "url": src.get("url") or "",
              "subquestions": src.get("subquestions") or []}
             for src in sources
         ],
         "sources_fetched": [
-            {"id": sid, "title": (by_id.get(sid) or {}).get("title") or "",
+            {"id": sid, "title": one_line((by_id.get(sid) or {}).get("title")),
              "url": (by_id.get(sid) or {}).get("url") or ""}
             for sid in dict.fromkeys(fetched)
         ],
@@ -736,8 +770,9 @@ def render_stats_md(stats: dict) -> str:
         f"- sessions: {stats['n_sessions']}",
         "",
         "## Cost",
-        f"- tokens: {stats['llm_tokens']['input']} in ({stats['llm_tokens']['cache_read']} cached), "
-        f"{stats['llm_tokens']['output']} out, {stats['llm_tokens']['api_calls']} API calls",
+        f"- tokens: {stats['llm_tokens'].get('input_total', stats['llm_tokens']['input'])} in "
+        f"({stats['llm_tokens']['cache_read']} cached), {stats['llm_tokens']['output']} out, "
+        f"{stats['llm_tokens']['api_calls']} API calls",
         f"- LLM: ${stats['llm_cost_usd']:.4f} · Exa: ${stats['exa_cost_usd']:.4f} · "
         f"total: ${stats['total_cost_usd']:.4f}",
         "",
@@ -805,6 +840,7 @@ def main(argv: list[str] | None = None) -> int:
 
     secrets = load_secrets()
     ensure_hermes()
+    ensure_python_shim()
     ensure_pdf_venv()
     sys.path.insert(0, str(EVAL_DIR))
     import variants  # noqa: E402  (same directory)
