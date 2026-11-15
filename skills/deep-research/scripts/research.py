@@ -48,6 +48,10 @@ TEXT_MAX_CHARS = 6000
 HIGHLIGHTS_PER_SOURCE = 8
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 QID_RE = re.compile(r"^q[0-9]+$")
+IDENTIFY_Q1_RE = re.compile(
+    r"^Identify exactly which .+ is meant: its canonical name, current URL and "
+    r"authorship history\.?$"
+)
 CITE_RE = re.compile(r"\[(S[0-9]+(?:\s*,\s*S[0-9]+)*)\]")
 CITE_LINK_RE = re.compile(r"\[\[[0-9]+\]\]\(")
 MAX_PARAGRAPH_CITATION_WARN = 0.60
@@ -591,6 +595,27 @@ def validate_plan(plan: dict) -> list[dict]:
         errors.append("plan.json: topic must be a non-empty string")
     if not isinstance(plan.get("slug"), str) or not plan.get("slug", "").strip():
         errors.append("plan.json: slug must be a non-empty string")
+
+    asks = plan.get("asks")
+    if not isinstance(asks, list) or not asks:
+        errors.append("plan.json: asks must be a non-empty list of strings")
+        asks = []
+    else:
+        for index, ask in enumerate(asks):
+            if not isinstance(ask, str) or not ask.strip():
+                errors.append(f"plan.json: asks[{index}] must be a non-empty string")
+
+    if not isinstance(plan.get("user_context"), str):
+        errors.append("plan.json: user_context must be a string (empty is allowed)")
+    identify = plan.get("identify", [])
+    if not isinstance(identify, list):
+        errors.append("plan.json: identify must be a list of strings when present")
+        identify = []
+    else:
+        for index, artifact in enumerate(identify):
+            if not isinstance(artifact, str) or not artifact.strip():
+                errors.append(f"plan.json: identify[{index}] must be a non-empty string")
+
     subquestions = plan.get("subquestions")
     if not isinstance(subquestions, list):
         errors.append("plan.json: subquestions must be a list")
@@ -598,6 +623,8 @@ def validate_plan(plan: dict) -> list[dict]:
     elif not 1 <= len(subquestions) <= 8:
         errors.append(f"plan.json: subquestions must have 1-8 items (found {len(subquestions)})")
     seen: set[str] = set()
+    covered: set[int] = set()
+    q1_question = ""
     for index, item in enumerate(subquestions):
         where = f"subquestions[{index}]"
         if not isinstance(item, dict):
@@ -610,18 +637,45 @@ def validate_plan(plan: dict) -> list[dict]:
             errors.append(f"plan.json: duplicate subquestion id {qid!r}")
         else:
             seen.add(qid)
+            if qid == "q1":
+                q1_question = str(item.get("question") or "")
         question = item.get("question")
         if not isinstance(question, str) or not question.strip():
             errors.append(f"plan.json: {where}.question must be a non-empty string")
         queries = item.get("queries")
         if not isinstance(queries, list):
             errors.append(f"plan.json: {where}.queries must be a list of strings")
-            continue
-        if not 1 <= len(queries) <= 6:
+        elif not 1 <= len(queries) <= 6:
             errors.append(f"plan.json: {where}.queries must have 1-6 items (found {len(queries)})")
-        for q_index, query in enumerate(queries):
-            if not isinstance(query, str) or not query.strip():
-                errors.append(f"plan.json: {where}.queries[{q_index}] must be a non-empty string")
+        else:
+            for q_index, query in enumerate(queries):
+                if not isinstance(query, str) or not query.strip():
+                    errors.append(f"plan.json: {where}.queries[{q_index}] must be a non-empty string")
+        covers = item.get("covers")
+        if not isinstance(covers, list):
+            errors.append(f"plan.json: {where}.covers must be a list of ask indices")
+        else:
+            for c_index, cover in enumerate(covers):
+                if isinstance(cover, bool) or not isinstance(cover, int):
+                    errors.append(f"plan.json: {where}.covers[{c_index}] must be an integer")
+                elif not 0 <= cover < len(asks):
+                    errors.append(
+                        f"plan.json: {where}.covers[{c_index}]={cover} is not a valid ask index"
+                    )
+                else:
+                    covered.add(cover)
+    uncovered = [index for index in range(len(asks)) if index not in covered]
+    if uncovered:
+        errors.append(
+            "plan.json: every ask must be covered by at least one subquestion; uncovered: "
+            + ", ".join(f"asks[{index}]" for index in uncovered)
+        )
+    if identify and not IDENTIFY_Q1_RE.match(q1_question.strip()):
+        errors.append(
+            'plan.json: identify is set, so q1.question must be "Identify exactly which '
+            '<artifact> is meant: its canonical name, current URL and authorship history"'
+        )
+
     if errors:
         for line in errors:
             note(f"error: {line}")
@@ -878,8 +932,135 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+SPANISH_HINTS = frozenset("""
+de la que el en los se del las un por con no una su para es al lo como mas pero sus le ya o
+este si porque esta entre cuando muy sin sobre tambien me hasta hay donde quien desde todo nos
+durante todos uno les ni contra otros ese eso ante ellos e esto mi antes algunos que unos yo
+otro otras otra el tanto esa estos mucho quienes nada muchos cual poco ella estar estas algunas
+algo nosotros mi mis tu te ti tus ellas nosotras vosotros vosotras os mio mia mios mias tuyo
+tuya tuyos tuyas suyo suya suyos suyas nuestro nuestra nuestros nuestras vuestro vuestra
+""".split())
+ENGLISH_HINTS = frozenset("""
+the of and to in a is that for it as was with be by on not he i this are or his from at which
+but have an they you were her she there one all we their has had what would will can been when
+who more no if out so said up its about into than them only other some could time these two
+may then do first any my now such like our over man me even most made after also did many off
+before must through back years where much your way well down should because each just those
+people how too little state good very make world still own see men work long get here between
+""".split())
+
+
+def detect_language(text: str) -> str:
+    """Best-effort stopword ratio; defaults to English for short/ambiguous text."""
+    words = re.findall(r"[a-záéíóúüñ]+", text.lower())
+    spanish = sum(1 for word in words if word in SPANISH_HINTS)
+    english = sum(1 for word in words if word in ENGLISH_HINTS)
+    return "es" if spanish > english else "en"
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\S+", _strip_references(text)))
+
+
+def _normalize_heading(text: str) -> str:
+    import unicodedata
+    folded = unicodedata.normalize("NFKD", text.lower())
+    folded = "".join(char for char in folded if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", folded).strip()
+
+
+REQUIRED_SECTIONS = (
+    ("Resumen/Summary", ("resumen", "summary")),
+    ("Qué hacer/What to do", ("que hacer", "what to do")),
+    ("No verificado/Not verified", ("no verificado", "not verified")),
+)
+
+
+def _missing_sections(text: str) -> list[str]:
+    headings = [_normalize_heading(item) for item in re.findall(r"^##\s+(.+?)\s*$", text, re.MULTILINE)]
+    missing = []
+    for label, names in REQUIRED_SECTIONS:
+        if not any(
+            heading == name or heading.startswith(name + " ") or heading.startswith(name + ":")
+            for heading in headings for name in names
+        ):
+            missing.append(label)
+    return missing
+
+
+MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+    "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+    "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+    "noviembre": 11, "diciembre": 12,
+}
+DEADLINE_RE = re.compile(
+    r"\b(cierre|plazo|fecha\s+l[ií]mite|inscripciones|deadline|closes|apply\s+by|"
+    r"applications?\s+close|due|vence|vencen)\b",
+    re.IGNORECASE,
+)
+
+
+def _dates_in_line(line: str) -> list[tuple["date", int, int]]:
+    from datetime import date
+    found: list[tuple[date, int, int]] = []
+    for match in re.finditer(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", line):
+        try:
+            found.append((date(int(match.group(1)), int(match.group(2)), int(match.group(3))),
+                          match.start(), match.end()))
+        except ValueError:
+            pass
+    for match in re.finditer(r"\b(\d{1,2})[/.](\d{1,2})[/.](20\d{2})\b", line):
+        first, second, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        day, month = (first, second) if first <= 12 or second > 12 else (second, first)
+        try:
+            found.append((date(year, month, day), match.start(), match.end()))
+        except ValueError:
+            pass
+    month_names = "|".join(sorted(MONTHS, key=len, reverse=True))
+    for match in re.finditer(
+        rf"\b({month_names})\s+(\d{{1,2}}),?\s+(20\d{{2}})\b", line, re.IGNORECASE
+    ):
+        try:
+            found.append((date(int(match.group(3)), MONTHS[match.group(1).lower()],
+                               int(match.group(2))), match.start(), match.end()))
+        except ValueError:
+            pass
+    for match in re.finditer(
+        rf"\b(\d{{1,2}})\s+(?:de\s+)?({month_names})\s+(?:de\s+)?(20\d{{2}})\b",
+        line, re.IGNORECASE,
+    ):
+        try:
+            found.append((date(int(match.group(3)), MONTHS[match.group(2).lower()],
+                               int(match.group(1))), match.start(), match.end()))
+        except ValueError:
+            pass
+    return found
+
+
+def _date_warnings(text: str) -> list[str]:
+    from datetime import datetime as _datetime
+    today = _datetime.now().date()
+    warnings = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        keywords = list(DEADLINE_RE.finditer(line))
+        if not keywords:
+            continue
+        dates = _dates_in_line(line)
+        for value, start, _end in dates:
+            if value < today and any(abs(keyword.start() - start) <= 80 for keyword in keywords):
+                warnings.append(
+                    f"warning: line {lineno} mentions a deadline date in the past "
+                    f"({value.isoformat()}): {line.strip()[:180]}"
+                )
+                break
+    return warnings
+
+
 def _strip_references(text: str) -> str:
-    pattern = re.compile(r"^##\s+(references|sources)\s*$", re.IGNORECASE | re.MULTILINE)
+    pattern = re.compile(r"^##\s+(references|sources|referencias|fuentes)\s*$",
+                         re.IGNORECASE | re.MULTILINE)
     matches = list(pattern.finditer(text))
     if not matches:
         return text
@@ -921,6 +1102,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         text = draft_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         die(f"error: cannot read draft {draft_path}: {exc}", 2)
+    language = getattr(args, "lang", None) or detect_language(text)
 
     unknown: list[tuple[str, int]] = []
     order: list[str] = []
@@ -955,6 +1137,20 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         })
         return 1
 
+    missing_sections = _missing_sections(text)
+    if missing_sections:
+        note("error: the draft is missing required sections:")
+        for section in missing_sections:
+            note(f"  {section}")
+        note("Add the sections in the report language, then re-run finalize.")
+        append_log(work, {
+            "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+            "fetched_id": None, "cost": None, "ok": False,
+            "error": "missing sections: " + ", ".join(missing_sections),
+            "report": str(out_path),
+        })
+        return 1
+
     numbers = {sid: index for index, sid in enumerate(order, 1)}
 
     def replace(match: re.Match) -> str:
@@ -964,6 +1160,15 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
     body = _strip_references(text)
     new_text = CITE_RE.sub(replace, body)
+    warnings: list[str] = []
+    word_count = _word_count(text)
+    if word_count > 5000:
+        warnings.append(
+            f"warning: report is {word_count} words (target <= 4500, hard warning above 5000)"
+        )
+    warnings.extend(_date_warnings(text))
+    for warning in warnings:
+        note(warning)
 
     paragraphs = _body_paragraphs(new_text)
     cited = sum(1 for para in paragraphs if CITE_LINK_RE.search(para))
@@ -974,7 +1179,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             f"({ratio:.0%}) contain a citation (target >= 60%)"
         )
 
-    refs = ["## References", ""]
+    refs = ["## Referencias" if language == "es" else "## References", ""]
     for sid in order:
         refs.append(_reference_line(numbers[sid], by_id[sid]))
     final_text = new_text.rstrip() + "\n\n" + "\n".join(refs) + "\n"
@@ -996,6 +1201,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 "paragraphs": len(paragraphs),
                 "ratio": round(ratio, 4),
             },
+            "language": language,
+            "word_count": word_count,
+            "warnings": warnings,
         },
     )
     append_log(work, {
@@ -1005,12 +1213,62 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         "citations": len(order),
         "coverage": f"{cited}/{len(paragraphs)}",
         "coverage_ratio": round(ratio, 4),
+        "language": language,
+        "word_count": word_count,
+        "warnings": len(warnings),
     })
     print(f"report: {out_path}")
     print(f"citations: {len(order)} distinct sources, renumbered to [[1]]..[[{len(order)}]]")
     print(f"paragraph citation coverage: {cited}/{len(paragraphs)} ({ratio:.0%})")
     print(f"references: {len(order)}")
     return 0
+
+
+CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
+DATE_STATUS_VALUES = frozenset({"open", "past", "unknown"})
+
+
+def validate_finding(data, qid: str = "") -> list[str]:
+    """Shape errors for one findings JSON file (used by status and tests)."""
+    label = qid or str(data.get("id") if isinstance(data, dict) else "?")
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        return [f"{label}: findings must be a JSON object"]
+    if not isinstance(data.get("id"), str) or not QID_RE.match(data.get("id", "")):
+        errors.append(f"{label}: id must match ^q[0-9]+$")
+    if not isinstance(data.get("question"), str) or not data.get("question", "").strip():
+        errors.append(f"{label}: question must be a non-empty string")
+    if not isinstance(data.get("answer_summary"), str) or not data.get("answer_summary", "").strip():
+        errors.append(f"{label}: answer_summary must be a non-empty string")
+    findings = data.get("findings")
+    if not isinstance(findings, list) or not findings:
+        errors.append(f"{label}: findings must be a non-empty list")
+        findings = []
+    for index, item in enumerate(findings):
+        where = f"{label}: findings[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{where} must be an object")
+            continue
+        if not isinstance(item.get("claim"), str) or not item.get("claim", "").strip():
+            errors.append(f"{where}.claim must be a non-empty string")
+        source_ids = item.get("source_ids")
+        if not isinstance(source_ids, list) or not source_ids:
+            errors.append(f"{where}.source_ids must be a non-empty list of S-ids")
+        else:
+            for sid in source_ids:
+                if not isinstance(sid, str) or not re.match(r"^S[0-9]+$", sid):
+                    errors.append(f"{where}.source_ids contains a non-S-id: {sid!r}")
+        if item.get("confidence") not in CONFIDENCE_VALUES:
+            errors.append(f"{where}.confidence must be high, medium or low")
+        if not isinstance(item.get("verified"), bool):
+            errors.append(f"{where}.verified must be true or false")
+        if "date_status" in item and item.get("date_status") not in DATE_STATUS_VALUES:
+            errors.append(f"{where}.date_status must be open, past or unknown")
+    for field in ("contradictions", "gaps"):
+        values = data.get(field)
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            errors.append(f"{label}: {field} must be a list of strings")
+    return errors
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -1046,6 +1304,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print(f"evidence:  [{'x' if evidence else ' '}] {len(evidence)} files")
         print(f"findings:  [{'x' if findings else ' '}] {len(findings)} files")
+
+    shape_errors: list[str] = []
+    for qid in findings:
+        try:
+            data = json.loads((work / "findings" / f"{qid}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            shape_errors.append(f"{qid}: not valid JSON ({exc})")
+            continue
+        shape_errors.extend(validate_finding(data, qid))
+    if shape_errors:
+        print(f"findings shape: [!] {len(shape_errors)} issue(s)")
+        for error in shape_errors[:5]:
+            print(f"  {error}")
 
     draft = work / "draft.md"
     print(f"draft:     [{'x' if draft.exists() else ' '}] {draft if draft.exists() else 'missing'}")
@@ -1130,6 +1401,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_final.add_argument("--work", required=True, help="work dir (from init)")
     p_final.add_argument("--draft", required=True, help="path to the draft markdown")
     p_final.add_argument("--out", required=True, help="final report path, e.g. ~/research/<slug>.md")
+    p_final.add_argument("--lang", choices=("es", "en"),
+                         help="report language for the References heading (auto-detected when omitted)")
     p_final.set_defaults(func=cmd_finalize)
 
     p_status = sub.add_parser("status", help="show which pipeline steps are done")

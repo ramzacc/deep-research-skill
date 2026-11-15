@@ -72,8 +72,11 @@ def plan_of(*subquestions: tuple[str, list[str]]) -> dict:
     return {
         "topic": "Test topic",
         "slug": SLUG,
+        "asks": ["Cover every subquestion"],
+        "user_context": "",
+        "identify": [],
         "subquestions": [
-            {"id": qid, "question": f"Question {qid}?", "queries": queries}
+            {"id": qid, "question": f"Question {qid}?", "queries": queries, "covers": [0]}
             for qid, queries in subquestions
         ],
     }
@@ -325,21 +328,21 @@ def test_retry_on_429_then_success(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize(
     ("plan", "expected"),
     [
-        ({"topic": "t", "slug": SLUG, "subquestions": [
-            {"id": "bad", "question": "q?", "queries": ["x"]}]},
+        ({"topic": "t", "slug": SLUG, "asks": ["a"], "user_context": "", "subquestions": [
+            {"id": "bad", "question": "q?", "queries": ["x"], "covers": [0]}]},
          "must match ^q[0-9]+$"),
-        ({"topic": "t", "slug": SLUG, "subquestions": [
-            {"id": f"q{i}", "question": "q?", "queries": ["x"]} for i in range(1, 10)]},
+        ({"topic": "t", "slug": SLUG, "asks": ["a"], "user_context": "", "subquestions": [
+            {"id": f"q{i}", "question": "q?", "queries": ["x"], "covers": [0]} for i in range(1, 10)]},
          "1-8 items"),
-        ({"topic": "t", "slug": SLUG, "subquestions": [
-            {"id": "q1", "question": "q?", "queries": []}]},
+        ({"topic": "t", "slug": SLUG, "asks": ["a"], "user_context": "", "subquestions": [
+            {"id": "q1", "question": "q?", "queries": [], "covers": [0]}]},
          "1-6 items"),
-        ({"topic": "t", "slug": SLUG, "subquestions": [
-            {"id": "q1", "question": "q?", "queries": ["x"]},
-            {"id": "q1", "question": "q?", "queries": ["y"]}]},
+        ({"topic": "t", "slug": SLUG, "asks": ["a"], "user_context": "", "subquestions": [
+            {"id": "q1", "question": "q?", "queries": ["x"], "covers": [0]},
+            {"id": "q1", "question": "q?", "queries": ["y"], "covers": [0]}]},
          "duplicate subquestion id"),
-        ({"topic": "t", "slug": SLUG, "subquestions": [
-            {"id": "q1", "question": "srsly?", "queries": ["  "]}]},
+        ({"topic": "t", "slug": SLUG, "asks": ["a"], "user_context": "", "subquestions": [
+            {"id": "q1", "question": "srsly?", "queries": ["  "], "covers": [0]}]},
          "non-empty string"),
     ],
 )
@@ -350,6 +353,47 @@ def test_plan_validation_errors(tmp_path, monkeypatch, capsys, plan, expected):
     assert code == 2
     assert "plan.json" in err
     assert expected in err
+
+
+def test_plan_requires_ask_coverage(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    plan = plan_of(("q1", ["a"]), ("q2", ["b"]))
+    plan["asks"] = ["first", "second"]
+    plan["subquestions"][0]["covers"] = [0]
+    plan["subquestions"][1]["covers"] = [0]
+    work = make_work(tmp_path, plan)
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 2
+    assert "uncovered: asks[1]" in err
+
+
+def test_plan_rejects_invalid_ask_index(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    plan = plan_of(("q1", ["a"]))
+    plan["asks"] = ["first"]
+    plan["subquestions"][0]["covers"] = [3]
+    work = make_work(tmp_path, plan)
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 2
+    assert "not a valid ask index" in err
+
+
+def test_identify_requires_q1_identification_question(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    plan = plan_of(("q1", ["a"]))
+    plan["identify"] = ["the guide"]
+    plan["subquestions"][0]["question"] = "What is the guide?"
+    work = make_work(tmp_path, plan)
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 2
+    assert "identify is set" in err
+
+    plan["subquestions"][0]["question"] = (
+        "Identify exactly which the guide is meant: its canonical name, current URL and authorship history"
+    )
+    (work / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 0, err
 
 
 def test_max_chars_env_default_and_cli_override(tmp_path, monkeypatch, capsys):
@@ -478,7 +522,8 @@ def test_finalize_renumbers_links_and_references(tmp_path, capsys):
         "# Report title\n\n"
         "First claim about the market [S3].\n\n"
         "Second paragraph with two sources [S1, S2].\n\n"
-        "Third paragraph with adjacent citations [S2][S4].\n",
+        "Third paragraph with adjacent citations [S2][S4].\n\n"
+        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "final.md"
@@ -547,7 +592,8 @@ def test_finalize_warns_on_low_citation_coverage(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
     draft.write_text(
-        "# Title\n\nCited one [S1].\n\nUncited two.\n\nUncited three.\n\nUncited four.\n",
+        "# Title\n\nCited one [S1].\n\nUncited two.\n\nUncited three.\n\nUncited four.\n\n"
+        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "f.md"
@@ -563,7 +609,8 @@ def test_finalize_replaces_existing_references_section(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
     draft.write_text(
-        "# Title\n\nClaim [S1].\n\n## References\n\n1. Stale entry. https://stale.example\n",
+        "# Title\n\nClaim [S1].\n\n## Resumen\n\n## Qué hacer\n\n## No verificado\n\n"
+        "## References\n\n1. Stale entry. https://stale.example\n",
         encoding="utf-8",
     )
     out = tmp_path / "f.md"
@@ -574,6 +621,121 @@ def test_finalize_replaces_existing_references_section(tmp_path, capsys):
     text = out.read_text(encoding="utf-8")
     assert text.count("## References") == 1
     assert "stale.example" not in text
+
+
+def test_finalize_spanish_references_heading(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Título\n\n## Resumen\n\nDato [S1].\n\n## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "final.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out),
+         "--lang", "es"], capsys,
+    )
+    assert code == 0, err
+    text = out.read_text(encoding="utf-8")
+    assert "## Referencias" in text
+    assert "## References" not in text
+    assert json.loads((work / "final.json").read_text())["language"] == "es"
+
+
+def test_finalize_auto_detects_spanish(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Título\n\n## Resumen\n\nLa tasa de la que hablamos es de 5 % y el plazo es amplio [S1].\n\n"
+        "## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "final.md"
+    code, _out, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys,
+    )
+    assert code == 0, err
+    assert "## Referencias" in out.read_text(encoding="utf-8")
+    assert json.loads((work / "final.json").read_text())["language"] == "es"
+
+
+def test_report_template_has_required_sections():
+    template = (SCRIPT.parent.parent / "templates" / "report.md").read_text(encoding="utf-8")
+    for heading in ("## Summary", "## Disagreements & uncertainties", "## Not verified",
+                    "## What to do", "## Assumptions", "## Methodology"):
+        assert heading in template
+
+
+def test_finalize_missing_required_sections_exits_1(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text("# Title\n\nClaim [S1].\n", encoding="utf-8")
+    code, _out, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(tmp_path / "f.md")],
+        capsys,
+    )
+    assert code == 1
+    assert "missing required sections" in err
+    assert "Resumen/Summary" in err
+    assert "Qué hacer/What to do" in err
+    assert "No verificado/Not verified" in err
+
+
+def test_finalize_warns_on_long_report(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    body = " ".join(["word"] * 5005)
+    draft.write_text(
+        "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    code, _out, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(tmp_path / "f.md")],
+        capsys,
+    )
+    assert code == 0
+    assert "warning: report is" in err
+    assert "word" in err
+
+
+def test_finalize_warns_on_past_deadline(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n## Resumen\n\nThe application deadline is 2025-01-01 [S1].\n\n"
+        "## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    code, _out, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(tmp_path / "f.md")],
+        capsys,
+    )
+    assert code == 0
+    assert "mentions a deadline date in the past" in err
+    assert "2025-01-01" in err
+
+
+def test_validate_finding_shape():
+    good = {
+        "id": "q1",
+        "question": "Question?",
+        "answer_summary": "Summary [S1].",
+        "findings": [
+            {"claim": "A fact.", "source_ids": ["S1"], "confidence": "high",
+             "verified": True, "date_status": "open"}
+        ],
+        "contradictions": [],
+        "gaps": [],
+    }
+    assert research.validate_finding(good) == []
+    bad = json.loads(json.dumps(good))
+    bad["findings"][0].pop("verified")
+    bad["findings"][0]["date_status"] = "someday"
+    bad["findings"][0]["source_ids"] = ["https://not-an-id"]
+    errors = research.validate_finding(bad)
+    assert any("verified" in error for error in errors)
+    assert any("date_status" in error for error in errors)
+    assert any("non-S-id" in error for error in errors)
 
 
 # --------------------------------------------------------------------------
