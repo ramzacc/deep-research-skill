@@ -40,9 +40,13 @@ SUBQ_RULE_ANCHOR = "- 4-8 subquestions, ids `q1`..`q8` in order, unique."
 BUDGET_ANCHOR = (
     "- 4-8 subquestions, 3-5 queries each, 8 results per query, 6000 chars per source."
 )
-FOLLOWUP_STEP2_ANCHOR = "  STEP 2 — Optional, at most 4 search calls and 3 fetch calls total:"
+FOLLOWUP_STEP2_ANCHOR = (
+    "  STEP 2 — Follow-up research: at most 4 search calls. "
+    "Fetch at least 2 and at most 4 pages total:"
+)
 FOLLOWUP_BUDGET_ANCHOR = (
-    "- Per subquestion researcher: max 4 follow-up search calls (≤3 queries each) and 3 fetches."
+    "- Per subquestion researcher: max 4 follow-up search calls (≤3 queries each) and fetch at\n"
+    "  least 2, at most 4 pages."
 )
 STEP4_START = "## Step 4 — Depth (delegated researchers)"
 STEP5_START = "## Step 5 — Synthesize"
@@ -55,32 +59,38 @@ sequentially, one at a time.
 
 For each subquestion `<QID>` in plan.json, in order q1, q2, ...:
 
-1. Read `<WORK>/evidence/<QID>.md` (a digest of candidate sources with stable S-ids).
-2. Optional, at most 4 search calls and 3 fetch calls total for that subquestion:
+1. Note the plan's `user_context`, the `covers` indices with their exact ask text, and today's
+   date. Read `<WORK>/evidence/<QID>.md` (a digest of candidate sources with stable S-ids).
+2. Optional, at most 4 search calls. Fetch at least 2 and at most 4 pages total:
    `python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "your query"`
    (repeat --query up to 3 times per call)
    `python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12 --max-chars 20000`
-   Only fetch a page when its evidence excerpt is insufficient. Use the new S-ids they print.
+   For every price, deadline, eligibility rule or other decision-critical number, fetch its
+   source and confirm the value in the full text. Use the fetched full text, not the excerpt.
 3. Answer the subquestion using ONLY facts present in the evidence file or in pages you
    fetched. Cite with S-ids that appear in those outputs. If sources conflict, record the
    conflict instead of picking a side silently. If evidence is missing, say so in gaps.
+   For every date, set date_status relative to today: "open", "past" or "unknown". Never
+   present a past deadline as actionable; give the next cycle if the sources show one.
 4. Write valid JSON to `<WORK>/findings/<QID>.json` using the file write tool:
    {"id": "<QID>",
     "question": "<QUESTION>",
     "answer_summary": "3-6 sentences answering the subquestion, each claim followed by its S-id citation",
-    "findings": [{"claim": "one verifiable fact with a number/date/name", "source_ids": ["S3"], "confidence": "high"}],
+    "findings": [{"claim": "one verifiable fact with a number/date/name", "source_ids": ["S3"],
+                  "confidence": "high", "verified": true, "date_status": "open"}],
     "contradictions": ["source A says X [S4] while source B says Y [S9]"],
     "gaps": ["what could not be established and why"]}
 
    Rules for the JSON: 3-8 findings; source_ids are S-ids only, never URLs; confidence is
-   exactly "high", "medium" or "low"; contradictions and gaps are arrays (may be empty).
+   exactly "high", "medium" or "low"; verified is true only when the claim was confirmed in
+   fetched full text; date_status is required on date claims and is exactly "open", "past" or
+   "unknown" (omit it for non-date claims); contradictions and gaps are arrays (may be empty).
 5. Validate it and move on:
    `python3 -m json.tool <WORK>/findings/<QID>.json > /dev/null && echo ok`
 
 Finish every subquestion before synthesizing. Then continue at Step 5.
 
 """
-
 # One declarative table: adding config E is one entry.
 CONFIGS: dict[str, dict] = {
     "A": {
@@ -172,14 +182,18 @@ def patched_skill_md(config: str) -> str:
         text = replace_exact(
             text,
             FOLLOWUP_STEP2_ANCHOR,
-            f"  STEP 2 — Optional, at most {searches} search calls and {fetches} fetch calls total:",
+            f"  STEP 2 — Follow-up research: at most {searches} search calls. "
+            f"Fetch {'exactly' if searches == 2 and fetches == 2 else 'at least 2 and at most'} "
+            f"{fetches} pages total:",
             f"{config} follow-up step",
         )
         text = replace_exact(
             text,
             FOLLOWUP_BUDGET_ANCHOR,
             f"- Per subquestion researcher: max {searches} follow-up search calls "
-            f"(≤3 queries each) and {fetches} fetches.",
+            f"(≤3 queries each) and fetch "
+            f"{'exactly' if searches == 2 and fetches == 2 else 'at least 2, at most'} "
+            f"{fetches} pages.",
             f"{config} follow-up budget",
         )
 

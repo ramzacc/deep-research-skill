@@ -69,10 +69,10 @@ rest run. `score.py` joins the ranking with the stats and writes `SUMMARY.md`
 
 | Config | Subquestions | Results/query | Chars/source | Follow-ups | Delegation |
 |---|---|---|---|---|---|
-| A | exactly 4 | 5 | 6000 | 4 search / 3 fetch | yes |
-| B | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 3 fetch | yes |
-| C | exactly 8 | 10 | 6000 | 4 search / 3 fetch | yes |
-| D | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 3 fetch | no, sequential self-research |
+| A | exactly 4 | 5 | 6000 | 4 search / 2-4 fetch | yes |
+| B | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
+| C | exactly 8 | 10 | 6000 | 4 search / 2-4 fetch | yes |
+| D | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | no, sequential self-research |
 | E | 4-8 as shipped (target 6) | 5 | 2000 | 2 search / 2 fetch | yes |
 
 `evals/variants.py` copies `skills/deep-research/` and patches `SKILL.md` with

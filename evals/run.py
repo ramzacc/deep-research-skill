@@ -627,6 +627,27 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
     final_info = read_json(work / "final.json", {}) if work_original else {}
     log = read_log(work if work_original else None)
 
+    asks = plan.get("asks") or []
+    covers = [
+        cover for item in (plan.get("subquestions") or [])
+        for cover in (item.get("covers") or [])
+    ]
+    covered_asks = {cover for cover in covers if isinstance(cover, int) and 0 <= cover < len(asks)}
+    findings_total = 0
+    findings_verified = 0
+    findings_date_status: dict[str, int] = {}
+    for finding_path in sorted((work / "findings").glob("*.json")) if (work / "findings").is_dir() else []:
+        data = read_json(finding_path, {})
+        for finding in data.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            findings_total += 1
+            if finding.get("verified") is True:
+                findings_verified += 1
+            status = finding.get("date_status")
+            if status:
+                findings_date_status[str(status)] = findings_date_status.get(str(status), 0) + 1
+
     sources = registry.get("sources") or []
     by_id = {src.get("id"): src for src in sources}
     citation_map = final_info.get("citations") or {}
@@ -764,6 +785,11 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "total_cost_usd": round(llm_cost + exa_cost, 6),
         "pricing": {"input_per_m": PRICE_INPUT, "output_per_m": PRICE_OUTPUT, "cached_per_m": PRICE_CACHED},
         "n_subquestions": len(plan.get("subquestions") or []),
+        "n_asks": len(asks),
+        "n_covered_asks": len(covered_asks),
+        "findings_total": findings_total,
+        "findings_verified": findings_verified,
+        "findings_date_status": findings_date_status,
         "n_queries_batch": n_batch,
         "n_queries_adhoc": n_adhoc,
         "n_fetches": len(fetched),
@@ -819,9 +845,12 @@ def render_stats_md(stats: dict) -> str:
         f"- MEDIA line: {stats['media_line'] or 'none'} (valid: {stats['media_line_valid']})",
         "",
         "## Pipeline",
-        f"- subquestions: {stats['n_subquestions']}",
+        f"- subquestions: {stats['n_subquestions']} · asks covered: "
+        f"{stats.get('n_covered_asks', 0)}/{stats.get('n_asks', 0)}",
         f"- queries: {stats['n_queries_batch']} batch + {stats['n_queries_adhoc']} ad-hoc, "
         f"fetches: {stats['n_fetches']}",
+        f"- findings: {stats.get('findings_total', 0)} total, "
+        f"{stats.get('findings_verified', 0)} verified=true",
         f"- delegation called: {stats['delegation_called']} "
         f"({stats['delegate_task_calls']} delegate_task calls, {stats['n_subagent_sessions']} subagent sessions)",
         f"- sessions: {stats['n_sessions']}",
