@@ -209,8 +209,9 @@ output_schema: {
 ```
 
 After the call: if the result already contains the researchers' results, continue immediately
-to `status`. Otherwise say `N researchers running.` and **END YOUR TURN**; results arrive as a
-new message. Do not poll, do not sleep, do not do the work yourself while waiting.
+to `status`. Otherwise **END YOUR TURN** silently (no status message to the user); results
+arrive as a new message and wake you automatically. Do not poll, do not sleep, do not do the
+work yourself while waiting.
 
 When results arrive (or when you resume):
 1. `python3 ${HERMES_SKILL_DIR}/scripts/research.py status --work <WORK>`
