@@ -583,8 +583,11 @@ def detect_language(text: str) -> str:
 def thematic_sections(text: str) -> tuple[int, int]:
     headings = re.findall(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE)
     non_thematic = {
-        "executive summary", "disagreements & uncertainties", "disagreements and uncertainties",
-        "methodology", "references", "sources",
+        "executive summary", "summary", "resumen",
+        "disagreements & uncertainties", "disagreements and uncertainties",
+        "contradicciones e incertidumbres", "not verified", "no verificado",
+        "what to do", "qué hacer", "que hacer", "assumptions", "supuestos",
+        "methodology", "metodología", "references", "referencias", "sources", "fuentes",
     }
     thematic = [h for h in headings if h.strip().lower() not in non_thematic]
     return len(headings), len(thematic)
@@ -816,6 +819,8 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "report_words_body": body_words,
         "n_h2_total": n_h2,
         "n_thematic_sections": n_thematic,
+        "final_word_count": int(final_info.get("word_count") or 0),
+        "finalize_warnings": final_info.get("warnings") or [],
         "language": detect_language(report_text),
         "report_md": str(report_md.relative_to(out)) if report_md else None,
         "report_pdf": str(report_pdf.relative_to(out)) if report_pdf else None,
