@@ -23,6 +23,7 @@ import concurrent.futures
 import fcntl
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -44,7 +45,6 @@ VARIANTS_DIR = RUN_DIR / "skills"
 HERMES_VENV = RUN_DIR / "hermes-venv"
 HERMES_BIN = HERMES_VENV / "bin" / "hermes"
 PDF_VENV = RUN_DIR / "pdf-venv"
-SHIM_DIR = RUN_DIR / "bin"
 
 MODEL = "deepseek-v4.1-flash"
 PROVIDER = "opencode-go"
@@ -59,6 +59,7 @@ PRICE_CACHED = 0.003
 
 SECRET_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY")
 REQUIRED_KEYS = SECRET_KEYS + ("OPENCODE_GO_BASE_URL",)
+RUN_EXA_KEY_VAR = "DEEP_RESEARCH_EXA_KEY"
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -169,28 +170,6 @@ def ensure_hermes() -> None:
         )
 
 
-def ensure_python_shim() -> None:
-    """Give the eval's `python3` the Exa key.
-
-    Hermes deliberately strips EXA_API_KEY (a provider credential) from the
-    terminal sandbox, and refuses `terminal.env_passthrough` for it. A real VPS
-    runs research.py with the key exported, so the harness prepends one wrapper
-    that reads only that key from the gitignored `evals/.env`. The key is never
-    written into the shim or printed.
-    """
-    SHIM_DIR.mkdir(parents=True, exist_ok=True)
-    shim = SHIM_DIR / "python3"
-    shim.write_text(
-        "#!/bin/sh\n"
-        "# Harness shim: expose only EXA_API_KEY, which Hermes blocks from the terminal sandbox.\n"
-        f"EXA_API_KEY=\"$(sed -n 's/^EXA_API_KEY=//p' {ENV_FILE} | head -n 1)\"\n"
-        "export EXA_API_KEY\n"
-        "exec /usr/bin/python3 \"$@\"\n",
-        encoding="utf-8",
-    )
-    shim.chmod(0o700)
-
-
 def ensure_pdf_venv() -> None:
     """One shared PDF venv, so parallel runs do not each pip-install markdown-pdf."""
     python = PDF_VENV / "bin" / "python"
@@ -206,7 +185,7 @@ def ensure_pdf_venv() -> None:
             shutil.rmtree(PDF_VENV)
         subprocess.run([sys.executable, "-m", "venv", str(PDF_VENV)], check=True)
         subprocess.run(
-            [str(python), "-m", "pip", "install", "-q", "markdown-pdf>=1.13"],
+            [str(python), "-m", "pip", "install", "-q", "markdown-pdf==1.13.3", "PyMuPDF==2.1"],
             check=True,
         )
 
@@ -226,7 +205,11 @@ def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(skill_dir, dest)
-    env_lines = [f"{key}={secrets[key]}" for key in REQUIRED_KEYS]
+    env_lines = [
+        f"{RUN_EXA_KEY_VAR}={secrets['EXA_API_KEY']}",
+        f"OPENCODE_GO_API_KEY={secrets['OPENCODE_GO_API_KEY']}",
+        f"OPENCODE_GO_BASE_URL={secrets['OPENCODE_GO_BASE_URL']}",
+    ]
     env_path = home / ".env"
     env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     env_path.chmod(0o600)
@@ -335,7 +318,7 @@ def safe_name(text: str) -> str:
 
 def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Namespace,
             secrets: dict[str, str], variant_skill: Path, version: str, num_results: int,
-            base_url: str) -> dict:
+            max_chars: int, base_url: str) -> dict:
     rid = run_id(topic["id"], config, rep)
     out = RESULTS_DIR / batch / "runs" / rid
     stats_path = out / "stats.json"
@@ -358,13 +341,17 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     env.update({
         "HOME": str(child_home),
         "HERMES_HOME": str(hermes_home),
-        "PATH": f"{SHIM_DIR}{os.pathsep}{HERMES_VENV / 'bin'}{os.pathsep}{env.get('PATH', '')}",
         "HERMES_DEEP_RESEARCH_VENV": str(PDF_VENV),
         "DEEP_RESEARCH_NUM_RESULTS": str(num_results),
+        "DEEP_RESEARCH_MAX_CHARS": str(max_chars),
     })
     for key in REQUIRED_KEYS:
         env[key] = secrets[key]
-    # Never inherit a caller's Hermes overrides.
+    # The dedicated key reaches the terminal only through HERMES_HOME/.env and
+    # the skill's required_environment_variables declaration; EXA_API_KEY must
+    # not leak in from the caller.
+    env.pop("EXA_API_KEY", None)
+    env.pop(RUN_EXA_KEY_VAR, None)
     env.pop("HERMES_SINGLE_QUERY_SESSION", None)
 
     cmd = [
@@ -401,7 +388,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
         stderr_path=stderr_path, wall=wall, exit_code=exit_code, timed_out=timed_out,
         before_home=before_home, after_home=after_home, secrets=secrets,
         variant_skill=variant_skill, version=version, invocation="-s deep-research",
-        num_results=num_results, base_url=base_url,
+        num_results=num_results, max_chars=max_chars, base_url=base_url,
     )
     stats_path.write_text(json.dumps(stats, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "stats.md").write_text(render_stats_md(stats), encoding="utf-8")
@@ -467,6 +454,49 @@ def read_log(work: Path | None) -> list[dict]:
         if isinstance(record, dict):
             records.append(record)
     return records
+
+
+def run_dir_exa_cost(run_dir: Path) -> float:
+    """Exa spend for one run: stats.json when finished, live sources.json while running."""
+    stats = read_json(run_dir / "stats.json", {})
+    if stats:
+        try:
+            return float(stats.get("exa_cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    total = 0.0
+    work_root = run_dir / "home" / "research" / ".work"
+    if work_root.is_dir():
+        for sources in work_root.glob("*/sources.json"):
+            registry = read_json(sources, {})
+            try:
+                total += float(registry.get("cost_dollars") or 0.0)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def batch_exa_spend(batch: str) -> float:
+    """Exa spend of every run dir in the batch, finished or in flight."""
+    runs_dir = RESULTS_DIR / batch / "runs"
+    if not runs_dir.is_dir():
+        return 0.0
+    return sum(run_dir_exa_cost(path) for path in runs_dir.iterdir() if path.is_dir())
+
+
+def ordered_runs(topics: list[dict], configs: list[str], reps: int, batch: str) -> list[tuple]:
+    """rep 1 first, topic by topic, same shuffled config order in every rep."""
+    orders: dict[str, list[str]] = {}
+    for topic in topics:
+        order = list(configs)
+        random.Random(f"{batch}:{topic['id']}").shuffle(order)
+        orders[topic["id"]] = order
+    return [
+        (topic, config, rep)
+        for rep in range(1, reps + 1)
+        for topic in topics
+        for config in orders[topic["id"]]
+    ]
 
 
 def db_metrics(hermes_home: Path) -> dict:
@@ -584,7 +614,8 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
                   child_home: Path, hermes_home: Path, stdout_path: Path, stderr_path: Path,
                   wall: float, exit_code: int, timed_out: bool, before_home: dict,
                   after_home: dict, secrets: dict[str, str], variant_skill: Path,
-                  version: str, invocation: str, num_results: int, base_url: str) -> dict:
+                  version: str, invocation: str, num_results: int, max_chars: int,
+                  base_url: str) -> dict:
     reply = redact(read_reply(stdout_path), secrets)
     work_original = pick_work_dir(child_home)
     work = out / "work"
@@ -719,7 +750,8 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "timed_out": timed_out,
         "hermes": {"version": version, "model": MODEL, "provider": PROVIDER,
                    "base_url": base_url, "reasoning": REASONING, "toolsets": TOOLSETS,
-                   "skill_invocation": invocation, "num_results": num_results},
+                   "skill_invocation": invocation, "num_results": num_results,
+                   "max_chars": max_chars},
         "llm_tokens": {
             "input": usage["input"], "output": usage["output"],
             "cache_read": usage["cache_read"], "cache_write": usage["cache_write"],
@@ -839,6 +871,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reps", type=int, default=1, help="repetitions per topic x config")
     parser.add_argument("--parallel", type=int, default=3, help="parallel Hermes runs")
     parser.add_argument("--timeout-min", type=int, default=40, help="per-run wall timeout")
+    parser.add_argument("--max-exa-usd", type=float, default=None,
+                        help="do not start new runs once the batch's Exa spend reaches this cap")
     parser.add_argument("--force", action="store_true", help="re-run even when stats.json exists")
     parser.add_argument("--dry-run", action="store_true", help="print the run matrix, do nothing")
     args = parser.parse_args(argv)
@@ -856,7 +890,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.reps < 1:
         raise SystemExit("--reps must be >= 1")
 
-    runs = [(topic, config, rep) for topic in topics for config in configs for rep in range(1, args.reps + 1)]
+    runs = ordered_runs(topics, configs, args.reps, args.batch)
     if args.dry_run:
         print(f"batch: {args.batch}  runs: {len(runs)}  parallel: {args.parallel}")
         for topic, config, rep in runs:
@@ -865,7 +899,6 @@ def main(argv: list[str] | None = None) -> int:
 
     secrets = load_secrets()
     ensure_hermes()
-    ensure_python_shim()
     ensure_pdf_venv()
     sys.path.insert(0, str(EVAL_DIR))
     import variants  # noqa: E402  (same directory)
@@ -881,33 +914,62 @@ def main(argv: list[str] | None = None) -> int:
 
     failures = 0
     completed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
-        futures = {
-            pool.submit(run_one, args.batch, topic, config, rep, args, secrets, built[config],
-                        version, variants.CONFIGS[config]["num_results"], base_url):
-                (topic, config, rep)
-            for topic, config, rep in runs
-        }
-        for future in concurrent.futures.as_completed(futures):
-            topic, config, rep = futures[future]
-            rid = run_id(topic["id"], config, rep)
-            try:
-                result = future.result()
-            except Exception as exc:  # keep the batch alive; the run dir has the transcript
-                failures += 1
-                print(f"[{rid}] CRASH: {exc}", file=sys.stderr)
-                continue
-            if result.get("skipped"):
-                print(f"[{rid}] skip (stats.json exists)", file=sys.stderr)
-                continue
-            stats = result["stats"]
-            completed += 1
-            if stats["status"] != "ok":
-                failures += 1
-            print(f"[{rid}] {stats['status']} · {stats['wall_seconds']}s · "
-                  f"{len(stats['sources_found'])} sources · {len(stats['sources_cited'])} cited · "
-                  f"${stats['total_cost_usd']:.3f}", file=sys.stderr)
-    print(f"done: {completed} run(s), {failures} not ok", file=sys.stderr)
+    not_started = 0
+    pending = []
+    for topic, config, rep in runs:
+        rid = run_id(topic["id"], config, rep)
+        stats_path = RESULTS_DIR / args.batch / "runs" / rid / "stats.json"
+        if stats_path.exists() and not args.force:
+            print(f"[{rid}] skip (stats.json exists)", file=sys.stderr)
+        else:
+            pending.append((topic, config, rep))
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel))
+    active: dict[concurrent.futures.Future, tuple] = {}
+    try:
+        while pending or active:
+            while pending and len(active) < max(1, args.parallel):
+                if args.max_exa_usd is not None:
+                    spend = batch_exa_spend(args.batch)
+                    if spend >= args.max_exa_usd:
+                        not_started = len(pending)
+                        print(f"budget reached (${spend:.3f} >= ${args.max_exa_usd:.3f}), "
+                              f"{not_started} run(s) not started", file=sys.stderr)
+                        pending.clear()
+                        break
+                topic, config, rep = pending.pop(0)
+                future = pool.submit(
+                    run_one, args.batch, topic, config, rep, args, secrets, built[config],
+                    version, variants.CONFIGS[config]["num_results"],
+                    variants.CONFIGS[config].get("max_chars", 6000), base_url,
+                )
+                active[future] = (topic, config, rep)
+            if not active:
+                break
+            done, _ = concurrent.futures.wait(active, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                topic, config, rep = active.pop(future)
+                rid = run_id(topic["id"], config, rep)
+                try:
+                    result = future.result()
+                except Exception as exc:  # keep the batch alive; the run dir has the transcript
+                    failures += 1
+                    print(f"[{rid}] CRASH: {exc}", file=sys.stderr)
+                    continue
+                if result.get("skipped"):
+                    print(f"[{rid}] skip (stats.json exists)", file=sys.stderr)
+                    continue
+                stats = result["stats"]
+                completed += 1
+                if stats["status"] != "ok":
+                    failures += 1
+                print(f"[{rid}] {stats['status']} · {stats['wall_seconds']}s · "
+                      f"{len(stats['sources_found'])} sources · {len(stats['sources_cited'])} cited · "
+                      f"${stats['total_cost_usd']:.3f}", file=sys.stderr)
+    finally:
+        pool.shutdown(wait=True)
+    suffix = f", {not_started} not started (budget)" if not_started else ""
+    print(f"done: {completed} run(s), {failures} not ok{suffix}", file=sys.stderr)
     return 0 if failures == 0 else 1
 
 

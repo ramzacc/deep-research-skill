@@ -11,6 +11,7 @@ A  4 subquestions exactly, 5 results per query, delegated researchers
 B  4-8 subquestions as shipped, 8 results per query, delegated (current default)
 C  8 subquestions exactly, 10 results per query, delegated
 D  same breadth as B, but Step 4 replaces delegation with sequential self-research
+E  budget: B breadth, 5 results/query, 2000 chars/source, 2 search + 2 fetch follow-ups
 
 `num_results` is applied at run time through `DEEP_RESEARCH_NUM_RESULTS`; the
 SKILL.md budget line is patched too so the model is never told a different
@@ -38,6 +39,10 @@ DEFAULT_OUT = ROOT / "evals" / ".run" / "skills"
 SUBQ_RULE_ANCHOR = "- 4-8 subquestions, ids `q1`..`q8` in order, unique."
 BUDGET_ANCHOR = (
     "- 4-8 subquestions, 3-5 queries each, 8 results per query, 6000 chars per source."
+)
+FOLLOWUP_STEP2_ANCHOR = "  STEP 2 — Optional, at most 4 search calls and 3 fetch calls total:"
+FOLLOWUP_BUDGET_ANCHOR = (
+    "- Per subquestion researcher: max 4 follow-up search calls (≤3 queries each) and 3 fetches."
 )
 STEP4_START = "## Step 4 — Depth (delegated researchers)"
 STEP5_START = "## Step 5 — Synthesize"
@@ -102,6 +107,15 @@ CONFIGS: dict[str, dict] = {
         "num_results": 8,
         "delegate": False,
     },
+    "E": {
+        "description": "budget: 4-8 subquestions (target 6), 5 results/query, "
+                       "2000 chars/source, 2 search + 2 fetch follow-ups",
+        "subquestions": {"min": 4, "max": 8, "target": 6},
+        "num_results": 5,
+        "max_chars": 2000,
+        "followups": {"searches": 2, "fetches": 2},
+        "delegate": True,
+    },
 }
 
 
@@ -147,9 +161,27 @@ def patched_skill_md(config: str) -> str:
         text,
         BUDGET_ANCHOR,
         f"- {budget_subq}, 3-5 queries each, {spec['num_results']} results per query, "
-        "6000 chars per source.",
+        f"{spec.get('max_chars', 6000)} chars per source.",
         f"{config} budget line",
     )
+
+    followups = spec.get("followups")
+    if followups:
+        searches = int(followups["searches"])
+        fetches = int(followups["fetches"])
+        text = replace_exact(
+            text,
+            FOLLOWUP_STEP2_ANCHOR,
+            f"  STEP 2 — Optional, at most {searches} search calls and {fetches} fetch calls total:",
+            f"{config} follow-up step",
+        )
+        text = replace_exact(
+            text,
+            FOLLOWUP_BUDGET_ANCHOR,
+            f"- Per subquestion researcher: max {searches} follow-up search calls "
+            f"(≤3 queries each) and {fetches} fetches.",
+            f"{config} follow-up budget",
+        )
 
     if not spec["delegate"]:
         text = replace_block(text, STEP4_START, STEP5_START, SELF_RESEARCH_STEP4, f"{config} step 4")
