@@ -765,10 +765,11 @@ def test_status_partial_state(tmp_path, capsys):
 def test_fetch_stores_full_text(tmp_path, monkeypatch, capsys):
     fixture = mock_fixture(tmp_path, [
         {"endpoint": "contents", "contains": "one.example",
-         "responses": [{"status": 200, "json": {"results": [{
-             "url": "https://one.example/a", "title": "Fetched",
-             "text": "FULL PAGE " * 50,
-         }]}}]},
+         "responses": [{"status": 200, "json": {
+             "results": [{"url": "https://one.example/a", "title": "Fetched",
+                          "text": "FULL PAGE " * 50}],
+             "costDollars": {"total": 0.001, "contents": {"text": 0.001}},
+         }}]},
     ])
     monkeypatch.setenv(research.MOCK_ENV, str(fixture))
     work = make_work(tmp_path)
@@ -782,6 +783,8 @@ def test_fetch_stores_full_text(tmp_path, monkeypatch, capsys):
     assert events[-1]["op"] == "fetch"
     assert events[-1]["fetched_id"] == "S1"
     assert events[-1]["ok"] is True
+    assert events[-1]["cost"] == 0.001
+    assert load_sources(work)["cost_dollars"] == 0.001
 
     code, _out, err = run_cli(["fetch", "--work", str(work), "--id", "S77"], capsys)
     assert code == 1

@@ -378,13 +378,17 @@ def exa_search(query: str, num_results: int, max_chars: int, api_key: str) -> tu
     return results, cost
 
 
-def exa_contents(url: str, max_chars: int, api_key: str) -> dict:
+def exa_contents(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
     payload = {"urls": [url], "text": {"maxCharacters": max_chars}}
     data = http_post_json(EXA_CONTENTS_URL, payload, api_key)
     results = data.get("results") or []
     if not results or not isinstance(results[0], dict):
         raise HttpError(502, f"/contents returned no result for {url}")
-    return results[0]
+    try:
+        cost = float((data.get("costDollars") or {}).get("total") or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
+    return results[0], cost
 
 
 # --------------------------------------------------------------------------
@@ -908,25 +912,31 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     max_chars = max(500, int(args.max_chars))
     note(f"fetching {sid}: {src['url']}")
     try:
-        page = with_retries(lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}")
+        page, cost = with_retries(
+            lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}"
+        )
     except HttpError as exc:
         append_log(work, {
             "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
             "fetched_id": sid, "cost": None, "ok": False, "error": str(exc),
         })
         raise
-    append_log(work, {
-        "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-        "fetched_id": sid, "cost": None, "ok": True, "error": None,
-    })
     text = str(page.get("text") or "")
     with sources_lock(work):
         registry = load_registry(work / "sources.json", slug_from_work(work))
         stored = source_by_id(registry, sid)
         if stored is not None and text:
             stored["text"] = text
-            registry["updated"] = utcnow()
-            write_json_atomic(work / "sources.json", registry)
+        if stored is not None:
+            registry["cost_dollars"] = round(
+                float(registry.get("cost_dollars") or 0.0) + cost, 6
+            )
+        registry["updated"] = utcnow()
+        write_json_atomic(work / "sources.json", registry)
+    append_log(work, {
+        "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+        "fetched_id": sid, "cost": round(cost, 6), "ok": True, "error": None,
+    })
     print(f"[{sid}] {page.get('title') or src.get('title') or ''} — {src['url']}")
     print(text or "(no text returned by /contents)")
     return 0
