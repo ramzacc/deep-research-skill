@@ -47,7 +47,6 @@ PDF_VENV = RUN_DIR / "pdf-venv"
 
 MODEL = "deepseek-v4.1-flash"
 PROVIDER = "opencode-go"
-BASE_URL = "https://opencode.ai/inference/go/v1"
 REASONING = "medium"
 TOOLSETS = "terminal,file,web,delegation,skills"
 SKILL_NAME = "deep-research"
@@ -190,13 +189,15 @@ def ensure_pdf_venv() -> None:
 
 
 def hermes_version() -> str:
-    proc = subprocess.run([str(HERMES_BIN), "--version"], capture_output=True, text=True,
-                          env={**os.environ, "HOME": str(RUN_DIR / "version-home"),
-                               "HERMES_HOME": str(RUN_DIR / "version-home" / ".hermes")})
-    return (proc.stdout or proc.stderr).strip().splitlines()[0] if (proc.stdout or proc.stderr) else "unknown"
+    """Record the pinned checkout, not `hermes --version`: that command bootstraps a
+    profile home before argument handling and would touch the real ~/.hermes."""
+    proc = subprocess.run(["git", "-C", str(RUN_DIR / "hermes-src"), "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True)
+    commit = proc.stdout.strip()
+    return f"git.{commit}" if proc.returncode == 0 and commit else "unknown"
 
 
-def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_results: int) -> None:
+def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_results: int, base_url: str) -> None:
     (home / "skills").mkdir(parents=True, exist_ok=True)
     dest = home / "skills" / SKILL_NAME
     if dest.exists():
@@ -211,7 +212,7 @@ _config_version: 53
 model:
   default: {MODEL}
   provider: {PROVIDER}
-  base_url: {BASE_URL}
+  base_url: {base_url}
 agent:
   reasoning_effort: {REASONING}
 delegation:
@@ -285,7 +286,8 @@ def safe_name(text: str) -> str:
 
 
 def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Namespace,
-            secrets: dict[str, str], variant_skill: Path, version: str, num_results: int) -> dict:
+            secrets: dict[str, str], variant_skill: Path, version: str, num_results: int,
+            base_url: str) -> dict:
     rid = run_id(topic["id"], config, rep)
     out = RESULTS_DIR / batch / "runs" / rid
     stats_path = out / "stats.json"
@@ -302,7 +304,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     if hermes_home.exists():
         shutil.rmtree(hermes_home)
     hermes_home.mkdir(parents=True)
-    write_hermes_home(hermes_home, variant_skill, secrets, num_results)
+    write_hermes_home(hermes_home, variant_skill, secrets, num_results, base_url)
 
     env = os.environ.copy()
     env.update({
@@ -351,7 +353,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
         stderr_path=stderr_path, wall=wall, exit_code=exit_code, timed_out=timed_out,
         before_home=before_home, after_home=after_home, secrets=secrets,
         variant_skill=variant_skill, version=version, invocation="-s deep-research",
-        num_results=num_results,
+        num_results=num_results, base_url=base_url,
     )
     stats_path.write_text(json.dumps(stats, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "stats.md").write_text(render_stats_md(stats), encoding="utf-8")
@@ -525,7 +527,7 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
                   child_home: Path, hermes_home: Path, stdout_path: Path, stderr_path: Path,
                   wall: float, exit_code: int, timed_out: bool, before_home: dict,
                   after_home: dict, secrets: dict[str, str], variant_skill: Path,
-                  version: str, invocation: str, num_results: int) -> dict:
+                  version: str, invocation: str, num_results: int, base_url: str) -> dict:
     reply = redact(read_reply(stdout_path), secrets)
     work_original = pick_work_dir(child_home)
     work = out / "work"
@@ -658,7 +660,7 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "exit_code": exit_code,
         "timed_out": timed_out,
         "hermes": {"version": version, "model": MODEL, "provider": PROVIDER,
-                   "base_url": BASE_URL, "reasoning": REASONING, "toolsets": TOOLSETS,
+                   "base_url": base_url, "reasoning": REASONING, "toolsets": TOOLSETS,
                    "skill_invocation": invocation, "num_results": num_results},
         "llm_tokens": {
             "input": usage["input"], "output": usage["output"],
@@ -812,6 +814,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"unknown config(s): {', '.join(unknown)}")
     built = variants.build_all(VARIANTS_DIR)
     version = hermes_version()
+    base_url = secrets["OPENCODE_GO_BASE_URL"]
     print(f"hermes: {version}")
     print(f"runs: {len(runs)}  batch: {args.batch}  parallel: {args.parallel}", file=sys.stderr)
 
@@ -820,7 +823,7 @@ def main(argv: list[str] | None = None) -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
         futures = {
             pool.submit(run_one, args.batch, topic, config, rep, args, secrets, built[config],
-                        version, variants.CONFIGS[config]["num_results"]):
+                        version, variants.CONFIGS[config]["num_results"], base_url):
                 (topic, config, rep)
             for topic, config, rep in runs
         }
