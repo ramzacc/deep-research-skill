@@ -256,35 +256,60 @@ def stop_gateway(home: Path) -> None:
     default, holding state.db. Each eval run owns its HERMES_HOME, so the pid
     in <home>/gateway.pid plus its HERMES_HOME env identify it safely.
     """
+    expected = str(home).encode()
+    pids: list[int] = []
     pid_path = home / "gateway.pid"
     try:
-        pid = int(pid_path.read_text(encoding="utf-8").strip())
+        raw = pid_path.read_text(encoding="utf-8").strip()
+        try:
+            pids.append(int(json.loads(raw)["pid"]))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pids.append(int(raw))
     except (OSError, ValueError):
-        return
-    if pid <= 1:
-        return
-    try:
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
-        environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-    except OSError:
-        return
-    if "gateway" not in cmdline:
-        return
-    expected = str(home).encode()
-    if not any(part.startswith(b"HERMES_HOME=") and part.split(b"=", 1)[1] == expected for part in environ):
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    for _ in range(100):
-        time.sleep(0.05)
-        if not Path(f"/proc/{pid}").exists():
-            return
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
         pass
+    # The pid file is absent for some auto-started gateways; find only processes
+    # whose own HERMES_HOME is this run's home (never a broad process sweep).
+    for proc in Path("/proc").glob("[0-9]*"):
+        try:
+            cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ")
+            environ = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"gateway" not in cmdline:
+            continue
+        if not any(part.startswith(b"HERMES_HOME=") and part.split(b"=", 1)[1] == expected for part in environ):
+            continue
+        try:
+            pid = int(proc.name)
+        except ValueError:
+            continue
+        if pid not in pids:
+            pids.append(pid)
+    for pid in pids:
+        if pid <= 1:
+            continue
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if "gateway" not in cmdline:
+            continue
+        if not any(part.startswith(b"HERMES_HOME=") and part.split(b"=", 1)[1] == expected for part in environ):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        for _ in range(100):
+            time.sleep(0.05)
+            if not Path(f"/proc/{pid}").exists():
+                break
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def real_hermes_home_snapshot() -> dict:
