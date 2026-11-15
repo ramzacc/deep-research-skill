@@ -45,30 +45,47 @@ def parse_ranking(path: Path) -> dict[str, dict[str, dict]]:
         return {}
     rankings: dict[str, dict[str, dict]] = {}
     topic: str | None = None
+    header: list[str] | None = None
     for line in path.read_text(encoding="utf-8").splitlines():
         heading = re.match(r"^##\s+(.+?)\s*$", line)
         if heading:
             topic = heading.group(1).strip()
             rankings.setdefault(topic, {})
+            header = None
             continue
         if topic is None or not line.strip().startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) < 2 or not LABEL_RE.match(cells[0]):
+        if not cells or not cells[0]:
             continue
+        if cells[0].lower() == "label":
+            header = [cell.lower() for cell in cells]
+            continue
+        if not LABEL_RE.match(cells[0]):
+            continue
+        if header is None:
+            header = ["label", "rank", "accuracy", "depth", "structure", "citations", "note"]
+        row = {header[index]: cells[index] for index in range(min(len(header), len(cells)))}
+        if row.get("label", cells[0]).lower() != cells[0].lower():
+            row["label"] = cells[0]
 
-        def number(index: int) -> int | None:
-            if len(cells) <= index or not cells[index]:
-                return None
+        def number(name: str) -> int | None:
+            value = row.get(name, "")
             try:
-                return int(cells[index])
+                return int(value) if value else None
             except ValueError:
                 return None
 
+        def choice(name: str) -> str | None:
+            value = str(row.get(name, "")).strip().lower()
+            return value if value in ("yes", "partial", "no") else None
+
         rankings[topic][cells[0]] = {
-            "rank": number(1),
-            **{field: number(index + 2) for index, field in enumerate(SCORE_FIELDS)},
-            "note": cells[6] if len(cells) > 6 else "",
+            "rank": number("rank"),
+            **{field: number(field) for field in SCORE_FIELDS},
+            "covered_all_asks": choice("covered_all_asks"),
+            "guide_ok": choice("guide_ok"),
+            "note": row.get("note", ""),
         }
     return rankings
 
@@ -76,6 +93,17 @@ def parse_ranking(path: Path) -> dict[str, dict[str, dict]]:
 def mean(values: list[float | int | None]) -> float | None:
     clean = [float(value) for value in values if value is not None]
     return statistics.fmean(clean) if clean else None
+
+
+def yes_rate(judged: list[dict], field: str) -> float | None:
+    values = [item.get(field) for item in judged if item.get(field) in ("yes", "partial", "no")]
+    if not values:
+        return None
+    return sum(1 for value in values if value == "yes") / len(values)
+
+
+def pct(value: float | None) -> str:
+    return "—" if value is None else f"{value * 100:.0f}%"
 
 
 def fmt(value: float | int | None, digits: int = 1, suffix: str = "") -> str:
@@ -105,8 +133,8 @@ def group_by_config(runs: list[dict], judged: dict[str, dict]) -> dict[str, dict
 def config_rows(table: dict[str, dict]) -> list[str]:
     lines = [
         "| config | runs | ok | mean rank | accuracy | depth | structure | citations | "
-        "sources found | cited | cited/found | coverage | Exa $ | LLM $ | total $ | wall s |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "covered_all_asks | guide_ok | sources found | cited | cited/found | coverage | Exa $ | LLM $ | total $ | wall s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for config in sorted(table):
         entry = table[config]
@@ -119,6 +147,8 @@ def config_rows(table: dict[str, dict]) -> list[str]:
             str(ok),
             fmt(mean([item.get("rank") for item in judged]), 2),
             *[fmt(mean([item.get(field) for item in judged]), 2) for field in SCORE_FIELDS],
+            pct(yes_rate(judged, "covered_all_asks")),
+            pct(yes_rate(judged, "guide_ok")),
             fmt(mean([len(run.get("sources_found") or []) for run in runs]), 1),
             fmt(mean([len(run.get("sources_cited") or []) for run in runs]), 1),
             fmt(mean([run.get("cited_found_ratio") for run in runs]) * 100 if mean([run.get("cited_found_ratio") for run in runs]) is not None else None, 0, "%"),
@@ -136,14 +166,17 @@ def topic_rows(runs: list[dict], judged: dict[str, dict]) -> list[str]:
     for run in runs:
         grouped.setdefault((str(run.get("topic") or "?"), str(run.get("config") or "?")), []).append(run)
     lines = [
-        "| topic | config | runs | mean rank | mean found | mean cited | mean coverage | mean $ | mean wall s |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| topic | config | runs | mean rank | covered_all_asks | guide_ok | mean found | mean cited | mean coverage | mean $ | mean wall s |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for (topic, config) in sorted(grouped):
         group = grouped[(topic, config)]
-        ranks = [judged[run["run_id"]].get("rank") for run in group if run["run_id"] in judged]
+        judgments = [judged[run["run_id"]] for run in group if run["run_id"] in judged]
+        ranks = [item.get("rank") for item in judgments]
         lines.append("| " + " | ".join([
             topic, config, str(len(group)), fmt(mean(ranks), 2),
+            pct(yes_rate(judgments, "covered_all_asks")),
+            pct(yes_rate(judgments, "guide_ok")),
             fmt(mean([len(run.get("sources_found") or []) for run in group]), 1),
             fmt(mean([len(run.get("sources_cited") or []) for run in group]), 1),
             fmt(mean([run.get("citation_coverage_pct") for run in group]), 0, "%"),
@@ -196,10 +229,20 @@ def appendix(runs: list[dict], judged: dict[str, dict]) -> list[str]:
     for run in sorted(runs, key=lambda item: (str(item.get("topic")), str(item.get("config")), item.get("rep") or 0)):
         found = run.get("sources_found") or []
         cited = run.get("sources_cited") or []
-        rank = judged.get(run["run_id"], {}).get("rank")
+        judgment = judged.get(run["run_id"], {})
+        rank = judgment.get("rank")
+        covered = judgment.get("covered_all_asks")
+        guide = judgment.get("guide_ok")
+        extras = []
+        if rank:
+            extras.append(f"rank {rank}")
+        if covered:
+            extras.append(f"covered_all_asks {covered}")
+        if guide:
+            extras.append(f"guide_ok {guide}")
         lines += [
             f"### {run.get('topic')} · config {run.get('config')} · rep {run.get('rep')} · {run.get('status')}"
-            + (f" · rank {rank}" if rank else ""),
+            + (" · " + " · ".join(extras) if extras else ""),
             "",
             f"<details><summary>found {len(found)} · cited {len(cited)}</summary>",
             "",
@@ -236,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             judgment = (rankings.get(topic) or {}).get(label)
             if judgment:
                 judged[entry["run"]] = judgment
-    has_ranking = any(item.get("rank") for item in judged.values())
+    has_ranking = any(item.get("rank") or item.get("covered_all_asks") for item in judged.values())
 
     table = group_by_config(runs, judged)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
