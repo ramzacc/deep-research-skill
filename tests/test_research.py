@@ -236,6 +236,44 @@ def test_concurrent_adhoc_processes(tmp_path, monkeypatch, capsys):
     assert "[S1]" in (work / "evidence" / "q1.md").read_text()
 
 
+def test_log_jsonl_under_concurrent_adhoc(tmp_path, monkeypatch, capsys):
+    routes = []
+    for index in range(6):
+        routes.append({
+            "endpoint": "search",
+            "contains": f"logged query {index}",
+            "responses": [{"delay": 0.25, **ok_response([hit(f"https://log{index}.example/page")], cost=0.01)}],
+        })
+    fixture = mock_fixture(tmp_path, routes)
+    work = make_work(tmp_path)
+    env = dict(os.environ)
+    env[research.MOCK_ENV] = str(fixture)
+    env[research.BACKOFF_ENV] = "0"
+    env.pop("EXA_API_KEY", None)
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, str(SCRIPT), "search", "--work", str(work),
+             "--subq", "q1", "--query", f"logged query {index}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        for index in range(6)
+    ]
+    results = [proc.communicate(timeout=120) for proc in procs]
+    for proc, (out, err) in zip(procs, results):
+        assert proc.returncode == 0, f"stdout={out}\nstderr={err}"
+
+    lines = (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 6
+    records = [json.loads(line) for line in lines]
+    assert {record["op"] for record in records} == {"search_adhoc"}
+    assert {record["subq"] for record in records} == {"q1"}
+    assert all(record["ok"] is True and record["error"] is None for record in records)
+    assert sorted(sid for record in records for sid in record["new_ids"]) == [f"S{i}" for i in range(1, 7)]
+    assert all(isinstance(record["ts"], str) and record["ts"] for record in records)
+    assert sum(float(record["cost"]) for record in records) == pytest.approx(0.06)
+
+
 # --------------------------------------------------------------------------
 # d. a permanently failing query does not abort the batch
 # --------------------------------------------------------------------------
@@ -322,6 +360,42 @@ def test_plan_dry_run_ok(tmp_path, monkeypatch, capsys):
     assert "plan ok: 2 subquestions, 3 queries" in out
 
 
+def test_num_results_env_default_and_cli_override(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    monkeypatch.setenv(research.BACKOFF_ENV, "0")
+    monkeypatch.delenv(research.NUM_RESULTS_ENV, raising=False)
+    seen: list[tuple[str, int]] = []
+
+    def fake(query, num_results, _api_key):
+        seen.append((query, num_results))
+        return [], 0.0
+
+    monkeypatch.setattr(research, "_run_query", fake)
+    work = make_work(tmp_path, plan_of(("q1", ["a", "b"])))
+
+    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+    assert sorted(seen) == [("a", 8), ("b", 8)]
+    assert research.default_num_results() == 8
+
+    seen.clear()
+    monkeypatch.setenv(research.NUM_RESULTS_ENV, "10")
+    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+    assert sorted(seen) == [("a", 10), ("b", 10)]
+    assert research.default_num_results() == 10
+
+    seen.clear()
+    code, _out, err = run_cli(["search", "--work", str(work), "--num-results", "3"], capsys)
+    assert code == 0, err
+    assert sorted(seen) == [("a", 3), ("b", 3)]
+
+    monkeypatch.setenv(research.NUM_RESULTS_ENV, "not-a-number")
+    assert research.default_num_results() == 8
+    monkeypatch.setenv(research.NUM_RESULTS_ENV, "0")
+    assert research.default_num_results() == 8
+
+
 # --------------------------------------------------------------------------
 # g. finalize
 # --------------------------------------------------------------------------
@@ -358,6 +432,16 @@ def test_finalize_renumbers_links_and_references(tmp_path, capsys):
     assert "[[1]](https://three.example/c)" in text
     assert "[[2]](https://one.example/a), [[3]](https://two.example/b)" in text
     assert "[[3]](https://two.example/b)[[4]](https://four.example/d)" in text
+    final_info = json.loads((work / "final.json").read_text(encoding="utf-8"))
+    assert final_info["citations"] == {"S3": 1, "S1": 2, "S2": 3, "S4": 4}
+    assert final_info["coverage"]["cited_paragraphs"] == 3
+    assert final_info["coverage"]["paragraphs"] >= 3
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["op"] == "finalize"
+    assert events[-1]["ok"] is True
+    assert events[-1]["citations"] == 4
+    assert events[-1]["report"] == str(out.resolve())
     assert "[S3]" not in text and "[S1, S2]" not in text
     assert "## References" in text
     refs = text.split("## References", 1)[1]
@@ -472,6 +556,11 @@ def test_fetch_stores_full_text(tmp_path, monkeypatch, capsys):
     assert code == 0, err
     assert "FULL PAGE" in out
     assert load_sources(work)["sources"][0]["text"].startswith("FULL PAGE")
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["op"] == "fetch"
+    assert events[-1]["fetched_id"] == "S1"
+    assert events[-1]["ok"] is True
 
     code, _out, err = run_cli(["fetch", "--work", str(work), "--id", "S77"], capsys)
     assert code == 1

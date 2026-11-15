@@ -56,6 +56,11 @@ MAX_PARAGRAPH_CITATION_WARN = 0.60
 MOCK_ENV = "DEEP_RESEARCH_MOCK"
 BACKOFF_ENV = "DEEP_RESEARCH_BACKOFF_BASE"
 
+# Results per query. DEEP_RESEARCH_NUM_RESULTS is the default; --num-results wins.
+NUM_RESULTS_ENV = "DEEP_RESEARCH_NUM_RESULTS"
+DEFAULT_NUM_RESULTS = 8
+LOG_FILE = "log.jsonl"
+
 _MOCK_CACHE: dict[str, tuple[float, dict]] = {}
 _MOCK_STATE: dict[str, dict] = {}
 _MOCK_LOCK = threading.Lock()
@@ -275,6 +280,22 @@ def http_post_json(url: str, payload: dict, api_key: str, timeout: float = 45.0)
         raise HttpError(0, f"network error: {reason}") from exc
 
 
+def default_num_results() -> int:
+    """Results per query: DEEP_RESEARCH_NUM_RESULTS, then 8. The CLI flag wins."""
+    raw = os.environ.get(NUM_RESULTS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_NUM_RESULTS
+    try:
+        value = int(raw)
+    except ValueError:
+        note(f"warning: {NUM_RESULTS_ENV}={raw!r} is not an integer; using {DEFAULT_NUM_RESULTS}")
+        return DEFAULT_NUM_RESULTS
+    if value < 1:
+        note(f"warning: {NUM_RESULTS_ENV}={value} is below 1; using {DEFAULT_NUM_RESULTS}")
+        return DEFAULT_NUM_RESULTS
+    return value
+
+
 def backoff_base() -> float:
     try:
         return max(0.0, float(os.environ.get(BACKOFF_ENV, "1.0")))
@@ -381,11 +402,30 @@ def sources_lock(work: Path):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def merge_records(registry: dict, records: list[dict]) -> tuple[list[str], list[str]]:
+def append_log(work: Path, record: dict) -> None:
+    """Append one JSON line to <work>/log.jsonl.
+
+    Serialized with the source registry's lock so concurrent ad-hoc searches
+    never interleave partial lines. Logging is best-effort: an unwritable log
+    must not fail a research run.
+    """
+    line = json.dumps({"ts": utcnow(), **record}, ensure_ascii=False) + "\n"
+    try:
+        with sources_lock(work):
+            with open(work / LOG_FILE, "a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+    except OSError as exc:
+        note(f"warning: could not append to {work / LOG_FILE}: {exc}")
+
+
+def merge_records(registry: dict, records: list[dict], changes: list[dict] | None = None) -> tuple[list[str], list[str]]:
     """Merge search records into the registry in place.
 
     records: [{"qid": "q1", "query": "...", "results": [exa result, ...]}]
-    Returns (new_ids, touched_ids).
+    Returns (new_ids, touched_ids). When *changes* is a list, one
+    {"new_ids": [...], "matched_ids": [...]} entry per record is appended.
     """
     by_norm = {normalize_url(src.get("url", "")): src for src in registry["sources"]}
     next_num = 1
@@ -396,6 +436,8 @@ def merge_records(registry: dict, records: list[dict]) -> tuple[list[str], list[
     new_ids: list[str] = []
     touched: list[str] = []
     for record in records:
+        record_new: list[str] = []
+        record_touched: list[str] = []
         qid = record.get("qid") or ""
         query = record.get("query") or ""
         for item in record.get("results") or []:
@@ -422,6 +464,7 @@ def merge_records(registry: dict, records: list[dict]) -> tuple[list[str], list[
                 registry["sources"].append(src)
                 by_norm[norm] = src
                 new_ids.append(src["id"])
+                record_new.append(src["id"])
             if not src.get("title"):
                 src["title"] = str(item.get("title") or "").strip()
             if not src.get("published"):
@@ -442,6 +485,9 @@ def merge_records(registry: dict, records: list[dict]) -> tuple[list[str], list[
             if text and not src.get("text"):
                 src["text"] = text[:TEXT_MAX_CHARS]
             touched.append(src["id"])
+            record_touched.append(src["id"])
+        if changes is not None:
+            changes.append({"new_ids": record_new, "matched_ids": record_touched})
     # keep first-appearance order stable even if an id was seen again later
     registry["updated"] = utcnow()
     return new_ids, touched
@@ -611,7 +657,10 @@ def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api
             except HttpError as exc:
                 failures += 1
                 note(f"  query failed ({qid}): {query!r} -> {exc}")
-                results[(qid, query)] = {"qid": qid, "query": query, "results": [], "cost": 0.0, "ok": False}
+                results[(qid, query)] = {
+                    "qid": qid, "query": query, "results": [], "cost": 0.0,
+                    "ok": False, "error": str(exc),
+                }
                 continue
             note(f"  {qid}: {len(hits)} results for {query!r}")
             results[(qid, query)] = {"qid": qid, "query": query, "results": hits, "cost": cost, "ok": True}
@@ -624,6 +673,8 @@ def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api
 def cmd_search(args: argparse.Namespace) -> int:
     work = require_work(args.work)
     slug = slug_from_work(work)
+    if getattr(args, "num_results", None) is None:
+        args.num_results = default_num_results()
     plan: dict = {}
     plan_path = work / "plan.json"
     adhoc = bool(args.subq)
@@ -677,10 +728,38 @@ def cmd_search(args: argparse.Namespace) -> int:
         if plan.get("topic") and not registry.get("topic"):
             registry["topic"] = plan["topic"]
         before = {src["id"] for src in registry["sources"]}
-        new_ids, touched = merge_records(registry, records)
+        changes: list[dict] = []
+        new_ids, touched = merge_records(registry, records, changes)
         run_cost = sum(rec.get("cost") or 0.0 for rec in records)
         registry["cost_dollars"] = round(float(registry.get("cost_dollars") or 0.0) + run_cost, 6)
         write_json_atomic(work / "sources.json", registry)
+
+    if adhoc:
+        errors = [rec["error"] for rec in records if rec.get("error")]
+        append_log(work, {
+            "op": "search_adhoc",
+            "subq": args.subq,
+            "queries": [query for _qid, query in pairs],
+            "new_ids": new_ids,
+            "matched_ids": touched,
+            "fetched_id": None,
+            "cost": round(run_cost, 6),
+            "ok": not errors,
+            "error": "; ".join(errors) or None,
+        })
+    else:
+        for record, change in zip(records, changes):
+            append_log(work, {
+                "op": "search_batch",
+                "subq": record["qid"],
+                "queries": [record["query"]],
+                "new_ids": change["new_ids"],
+                "matched_ids": change["matched_ids"],
+                "fetched_id": None,
+                "cost": round(float(record.get("cost") or 0.0), 6),
+                "ok": bool(record.get("ok")),
+                "error": record.get("error"),
+            })
 
     if adhoc:
         qid = args.subq
@@ -749,7 +828,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     api_key = exa_key_required()
     max_chars = max(500, int(args.max_chars))
     note(f"fetching {sid}: {src['url']}")
-    page = with_retries(lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}")
+    try:
+        page = with_retries(lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}")
+    except HttpError as exc:
+        append_log(work, {
+            "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+            "fetched_id": sid, "cost": None, "ok": False, "error": str(exc),
+        })
+        raise
+    append_log(work, {
+        "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+        "fetched_id": sid, "cost": None, "ok": True, "error": None,
+    })
     text = str(page.get("text") or "")
     with sources_lock(work):
         registry = load_registry(work / "sources.json", slug_from_work(work))
@@ -817,6 +907,11 @@ def cmd_finalize(args: argparse.Namespace) -> int:
                 elif sid not in order:
                     order.append(sid)
     if not order and not unknown:
+        append_log(work, {
+            "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+            "fetched_id": None, "cost": None, "ok": False, "error": "draft contains no citations",
+            "report": str(out_path),
+        })
         die(
             "error: the draft contains no citations.\n"
             "Every factual claim needs an [S#] citation from sources.json. Fix the draft and re-run.",
@@ -827,6 +922,12 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         for sid, lineno in unknown:
             note(f"  {sid} on line {lineno}")
         note("Fix the draft (or run search/fetch to add those sources) and re-run finalize.")
+        append_log(work, {
+            "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+            "fetched_id": None, "cost": None, "ok": False,
+            "error": "unknown source ids: " + ", ".join(sorted({sid for sid, _ in unknown})),
+            "report": str(out_path),
+        })
         return 1
 
     numbers = {sid: index for index, sid in enumerate(order, 1)}
@@ -860,8 +961,26 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         die(f"error: cannot write report to {out_path}: {exc}", 1)
     write_json_atomic(
         work / "final.json",
-        {"out": str(out_path), "at": utcnow(), "sources_cited": len(order)},
+        {
+            "out": str(out_path),
+            "at": utcnow(),
+            "sources_cited": len(order),
+            "citations": {sid: numbers[sid] for sid in order},
+            "coverage": {
+                "cited_paragraphs": cited,
+                "paragraphs": len(paragraphs),
+                "ratio": round(ratio, 4),
+            },
+        },
     )
+    append_log(work, {
+        "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+        "fetched_id": None, "cost": None, "ok": True, "error": None,
+        "report": str(out_path),
+        "citations": len(order),
+        "coverage": f"{cited}/{len(paragraphs)}",
+        "coverage_ratio": round(ratio, 4),
+    })
     print(f"report: {out_path}")
     print(f"citations: {len(order)} distinct sources, renumbered to [[1]]..[[{len(order)}]]")
     print(f"paragraph citation coverage: {cited}/{len(paragraphs)} ({ratio:.0%})")
@@ -969,7 +1088,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--subq", help="ad-hoc mode: subquestion id, e.g. q3")
     p_search.add_argument("--query", action="append", help="ad-hoc mode: query (repeatable)")
     p_search.add_argument("--workers", type=int, default=8, help="parallel queries (default 8)")
-    p_search.add_argument("--num-results", type=int, default=8, help="results per query (default 8)")
+    p_search.add_argument("--num-results", type=int, default=None,
+                          help=f"results per query (default ${NUM_RESULTS_ENV} or {DEFAULT_NUM_RESULTS})")
     p_search.add_argument("--dry-run", action="store_true", help="validate plan.json and print the query count; no API calls")
     p_search.set_defaults(func=cmd_search)
 

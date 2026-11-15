@@ -107,6 +107,12 @@ reported and skipped so the run continues. Concurrent ad-hoc searches are safe: 
 merged under an exclusive `flock` with atomic replacement, so parallel researchers never
 duplicate ids or lose sources.
 
+`--num-results` defaults to 8, or to `DEEP_RESEARCH_NUM_RESULTS` when the flag is omitted.
+Each work dir also gets `log.jsonl`: one JSON line per `search_batch`, `search_adhoc`, `fetch`
+and `finalize` operation (query, new/matched source ids, cost, ok/error), appended under the
+same lock. `final.json` records the final `S#` → reference-number mapping and the paragraph
+citation coverage.
+
 ## Troubleshooting
 
 | Symptom | Fix |
