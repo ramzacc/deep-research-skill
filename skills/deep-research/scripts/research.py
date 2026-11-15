@@ -50,7 +50,8 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 QID_RE = re.compile(r"^q[0-9]+$")
 IDENTIFY_Q1_RE = re.compile(
     r"^Identify exactly which .+ is meant: its canonical name, current URL and "
-    r"authorship history\.?$"
+    r"authorship history\.?$",
+    re.DOTALL,
 )
 CITE_RE = re.compile(r"\[(S[0-9]+(?:\s*,\s*S[0-9]+)*)\]")
 CITE_LINK_RE = re.compile(r"\[\[[0-9]+\]\]\(")
