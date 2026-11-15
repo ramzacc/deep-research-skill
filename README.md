@@ -31,14 +31,26 @@ hermes skills update deep-research
 
 | Requirement | Why |
 |---|---|
-| `EXA_API_KEY` in `~/.hermes/.env` | search + page fetching (the skill calls Exa's REST API directly) |
+| `DEEP_RESEARCH_EXA_KEY` | search + page fetching (the skill calls Exa's REST API directly) |
 | `terminal` toolset enabled | runs `research.py` / `md_to_pdf.py` |
 | Python 3.10+ | both scripts are stdlib-only |
 | `python3-venv` | first PDF build creates a private venv at `~/.local/share/hermes-deep-research/venv` |
 | `delegate_task` (optional but recommended) | parallel per-subquestion researchers |
 
-If Exa is already your Hermes web backend, the key is already there. Declared env vars are
-passed to the terminal sandbox by Hermes.
+Set the key on the machine that runs Hermes:
+
+```bash
+hermes config set DEEP_RESEARCH_EXA_KEY <your-exa-key>
+```
+
+Use the same value as `EXA_API_KEY`. `EXA_API_KEY` alone is not enough: Hermes treats it as a
+web-provider credential and strips it from the terminal sandbox (and refuses to pass it through
+even when a skill declares it). `DEEP_RESEARCH_EXA_KEY` is a normal skill-declared variable, so
+Hermes registers it for the terminal after the skill loads. A running gateway picks up the new
+value on the next turn; start a new CLI chat after setting it.
+
+Declared skill variables are passed to the terminal sandbox by Hermes; Hermes-managed provider
+credentials are not.
 
 Recommended delegation setting in `~/.hermes/config.yaml` so a full batch runs at once:
 
@@ -117,12 +129,12 @@ citation coverage.
 
 | Symptom | Fix |
 |---|---|
-| `EXA_API_KEY is not set` | add `EXA_API_KEY=<key>` to `~/.hermes/.env`, restart the Hermes gateway |
+| `DEEP_RESEARCH_EXA_KEY is not set` | run `hermes config set DEEP_RESEARCH_EXA_KEY <key>`, then re-run |
 | `HTTP 401/403` | invalid/expired Exa key |
 | `HTTP 429` after retries | Exa rate limit; lower `--workers` (default 8) or retry later |
 | `plan.json is invalid` | the error lists exact fields; validate with `search --dry-run` |
 | `unknown source ids` from `finalize` | the draft cites an id that is not in `sources.json`; remove the claim or search for real evidence — never invent ids |
-| PDF fails with a venv/ensurepip error | `sudo apt install python3-venv` (Debian/Ubuntu) or `sudo dnf install python3-pip` (Fedora), then re-run; pandoc is used as a fallback if present |
+| PDF fails with a venv/ensurepip error | install `python3-venv` with your system package manager, then re-run; pandoc is used as a fallback if present |
 | PDF exists but the reply has no attachment | the final reply must end with exactly `MEDIA:/absolute/path.pdf` |
 | Research stops mid-run | ask "continue the research"; the agent runs `status` and resumes from the work dir |
 | Hub install misses a file | `SKILL.md` must literally reference every bundled path; all three are referenced |
@@ -140,6 +152,12 @@ Tests are fully offline. The HTTP layer is replaced by a JSON fixture selected w
 - `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search` and `/contents`
   responses (supports status codes, per-route response sequences, and artificial `delay`).
 - `DEEP_RESEARCH_BACKOFF_BASE=0` — disables retry sleeps in tests.
+
+Production knobs:
+
+- `DEEP_RESEARCH_EXA_KEY` — the Exa key used by the scripts (falls back to `EXA_API_KEY`).
+- `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 8; `--num-results` wins).
+- `DEEP_RESEARCH_MAX_CHARS` — page-text characters per source (default 6000; `--max-chars` wins).
 
 Layout:
 

@@ -11,9 +11,9 @@ version: 1.0.0
 author: ramzacc
 platforms: [linux, macos]
 required_environment_variables:
-  - name: EXA_API_KEY
+  - name: DEEP_RESEARCH_EXA_KEY
     prompt: Exa API key for search and page fetching
-    help: Create one at https://dashboard.exa.ai/api-keys. If Exa is your Hermes web backend it is already in ~/.hermes/.env.
+    help: Same value as your Exa API key. Set it with `hermes config set DEEP_RESEARCH_EXA_KEY <key>`.
     required_for: web search and page fetching
 metadata:
   hermes:
@@ -208,9 +208,9 @@ output_schema: {
 }
 ```
 
-After the call: say `N researchers running.` and **END YOUR TURN**. At top level
-`delegate_task` runs in the background; results arrive as a new message. Do not poll, do
-not sleep, do not do the work yourself while waiting.
+After the call: if the result already contains the researchers' results, continue immediately
+to `status`. Otherwise say `N researchers running.` and **END YOUR TURN**; results arrive as a
+new message. Do not poll, do not sleep, do not do the work yourself while waiting.
 
 When results arrive (or when you resume):
 1. `python3 ${HERMES_SKILL_DIR}/scripts/research.py status --work <WORK>`
@@ -302,8 +302,8 @@ completed work; re-running `search` is safe (ids are stable), and `finalize` is 
 
 ## Failure handling
 
-- `EXA_API_KEY is not set` → tell the user: add `EXA_API_KEY=<key>` to `~/.hermes/.env`
-  and restart the Hermes gateway, then ask them to re-run. Do not fake results.
+- `DEEP_RESEARCH_EXA_KEY is not set` → tell the user to run
+  `hermes config set DEEP_RESEARCH_EXA_KEY <their Exa key>` and re-run. Do not fake results.
 - `HTTP 401/403` → the key is invalid or exhausted. Report it; do not retry in a loop.
 - `HTTP 429/5xx` → the script already retried 3 times with backoff. Re-run the same
   command once; if it still fails, tell the user which queries failed and continue with

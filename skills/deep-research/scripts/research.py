@@ -59,6 +59,9 @@ BACKOFF_ENV = "DEEP_RESEARCH_BACKOFF_BASE"
 # Results per query. DEEP_RESEARCH_NUM_RESULTS is the default; --num-results wins.
 NUM_RESULTS_ENV = "DEEP_RESEARCH_NUM_RESULTS"
 DEFAULT_NUM_RESULTS = 8
+# Characters of page text per source. DEEP_RESEARCH_MAX_CHARS is the default; --max-chars wins.
+MAX_CHARS_ENV = "DEEP_RESEARCH_MAX_CHARS"
+DEFAULT_MAX_CHARS = TEXT_MAX_CHARS
 LOG_FILE = "log.jsonl"
 
 _MOCK_CACHE: dict[str, tuple[float, dict]] = {}
@@ -296,6 +299,22 @@ def default_num_results() -> int:
     return value
 
 
+def default_max_chars() -> int:
+    """Characters of page text per source: DEEP_RESEARCH_MAX_CHARS, then 6000."""
+    raw = os.environ.get(MAX_CHARS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MAX_CHARS
+    try:
+        value = int(raw)
+    except ValueError:
+        note(f"warning: {MAX_CHARS_ENV}={raw!r} is not an integer; using {DEFAULT_MAX_CHARS}")
+        return DEFAULT_MAX_CHARS
+    if value < 1:
+        note(f"warning: {MAX_CHARS_ENV}={value} is below 1; using {DEFAULT_MAX_CHARS}")
+        return DEFAULT_MAX_CHARS
+    return value
+
+
 def backoff_base() -> float:
     try:
         return max(0.0, float(os.environ.get(BACKOFF_ENV, "1.0")))
@@ -321,23 +340,27 @@ def with_retries(fn, attempts: int = 3, label: str = "request"):
 
 
 def exa_key_required() -> str:
-    key = os.environ.get("EXA_API_KEY", "").strip()
+    key = (
+        os.environ.get("DEEP_RESEARCH_EXA_KEY", "").strip()
+        or os.environ.get("EXA_API_KEY", "").strip()
+    )
     if not key and not os.environ.get(MOCK_ENV):
         die(
-            "error: EXA_API_KEY is not set.\n"
-            "Add EXA_API_KEY=<your key> to ~/.hermes/.env and restart the Hermes gateway,\n"
-            "or export it in the terminal session. The skill uses Exa's REST API directly.",
+            "error: DEEP_RESEARCH_EXA_KEY is not set.\n"
+            "Set it to your Exa API key (the same value as EXA_API_KEY):\n"
+            "  hermes config set DEEP_RESEARCH_EXA_KEY <your key>\n"
+            "Then re-run the command. The skill uses Exa's REST API directly.",
             2,
         )
     return key
 
 
-def exa_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], float]:
+def exa_search(query: str, num_results: int, max_chars: int, api_key: str) -> tuple[list[dict], float]:
     payload = {
         "query": query,
         "type": "auto",
         "numResults": num_results,
-        "contents": {"text": {"maxCharacters": TEXT_MAX_CHARS}, "highlights": True},
+        "contents": {"text": {"maxCharacters": max_chars}, "highlights": True},
     }
     data = http_post_json(EXA_SEARCH_URL, payload, api_key)
     results = data.get("results") or []
@@ -635,8 +658,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_query(query: str, num_results: int, api_key: str) -> tuple[list[dict], float]:
-    return exa_search(query, num_results, api_key)
+def _run_query(query: str, num_results: int, max_chars: int, api_key: str) -> tuple[list[dict], float]:
+    return exa_search(query, num_results, max_chars, api_key)
 
 
 def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api_key: str) -> tuple[list[dict], int]:
@@ -646,7 +669,7 @@ def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api
     workers = max(1, min(args.workers, len(pairs) or 1))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {
-            pool.submit(with_retries, lambda q=query: _run_query(q, args.num_results, api_key), 3, query): (qid, query)
+            pool.submit(with_retries, lambda q=query: _run_query(q, args.num_results, args.max_chars, api_key), 3, query): (qid, query)
             for qid, query in pairs
         }
         results: dict[tuple[str, str], dict] = {}
@@ -675,6 +698,8 @@ def cmd_search(args: argparse.Namespace) -> int:
     slug = slug_from_work(work)
     if getattr(args, "num_results", None) is None:
         args.num_results = default_num_results()
+    if getattr(args, "max_chars", None) is None:
+        args.max_chars = default_max_chars()
     plan: dict = {}
     plan_path = work / "plan.json"
     adhoc = bool(args.subq)
@@ -1090,6 +1115,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--workers", type=int, default=8, help="parallel queries (default 8)")
     p_search.add_argument("--num-results", type=int, default=None,
                           help=f"results per query (default ${NUM_RESULTS_ENV} or {DEFAULT_NUM_RESULTS})")
+    p_search.add_argument("--max-chars", type=int, default=None,
+                          help=f"page text characters per source (default ${MAX_CHARS_ENV} or {DEFAULT_MAX_CHARS})")
     p_search.add_argument("--dry-run", action="store_true", help="validate plan.json and print the query count; no API calls")
     p_search.set_defaults(func=cmd_search)
 

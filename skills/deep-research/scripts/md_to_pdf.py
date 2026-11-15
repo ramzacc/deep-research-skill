@@ -22,9 +22,10 @@ import sys
 import time
 from pathlib import Path
 
-IN_VENV_ENV = "HERMES_DEEP_RESEARCH_IN_VENV"
+IN_VENV_FLAG = "--in-venv"
 VENV_OVERRIDE_ENV = "HERMES_DEEP_RESEARCH_VENV"
-PIN = "markdown-pdf>=1.13"
+PIN = "markdown-pdf==1.13.3"
+PYMUPDF_PIN = "PyMuPDF==2.1"
 
 CSS = """
 body { font-family: sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1b1b1b; }
@@ -79,7 +80,7 @@ def venv_ready() -> bool:
 
 
 def bootstrap_venv() -> bool:
-    """Create the private venv and install markdown-pdf. True on success."""
+    """Create the private venv and install the pinned PDF stack. True on success."""
     vd = venv_dir()
     vd.parent.mkdir(parents=True, exist_ok=True)
     note(f"pdf: creating private venv at {vd} (first run only)")
@@ -98,30 +99,28 @@ def bootstrap_venv() -> bool:
         tail = detail[-1] if detail else f"exit {created.returncode}"
         note(f"pdf: venv creation failed: {tail}")
         return False
-    note(f"pdf: installing {PIN} ...")
+    note(f"pdf: installing {PIN} and {PYMUPDF_PIN} ...")
     try:
         installed = subprocess.run(
-            [str(venv_python()), "-m", "pip", "install", "--disable-pip-version-check", "--quiet", PIN],
+            [str(venv_python()), "-m", "pip", "install", "--disable-pip-version-check",
+             "--quiet", PIN, PYMUPDF_PIN],
             capture_output=True,
             text=True,
             timeout=900,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        note(f"pdf: pip install failed: {exc}")
+        note(f"pdf: package install failed: {exc}")
         return False
     if installed.returncode != 0:
         tail = (installed.stderr or installed.stdout or "").strip().splitlines()
-        note(f"pdf: pip install failed: {tail[-1] if tail else 'unknown error'}")
+        note(f"pdf: package install failed: {tail[-1] if tail else 'unknown error'}")
     return venv_ready()
 
 
 def reexec_in_venv(argv: list[str]) -> int:
     py = venv_python()
-    env = dict(os.environ)
-    env[IN_VENV_ENV] = "1"
     note(f"pdf: using venv {venv_dir()}")
-    os.environ[IN_VENV_ENV] = "1"
-    os.execve(str(py), [str(py), str(Path(__file__).resolve()), *argv], env)
+    os.execv(str(py), [str(py), str(Path(__file__).resolve()), IN_VENV_FLAG, *argv])
     return 1  # unreachable
 
 
@@ -182,6 +181,9 @@ def convert_with_pandoc(in_path: Path, out_path: Path, started: float) -> int | 
 
 
 def main(argv: list[str]) -> int:
+    in_venv = bool(argv) and argv[0] == IN_VENV_FLAG
+    if in_venv:
+        argv = argv[1:]
     if len(argv) == 1 and argv[0] in ("-h", "--help"):
         print(__doc__.strip())
         return 0
@@ -197,7 +199,7 @@ def main(argv: list[str]) -> int:
     if out_path == in_path:
         die("error: output path must differ from the input markdown path", 2)
 
-    if os.environ.get(IN_VENV_ENV) != "1":
+    if not in_venv:
         if venv_ready():
             return reexec_in_venv(argv)
         if bootstrap_venv():
@@ -208,10 +210,9 @@ def main(argv: list[str]) -> int:
         die(
             "error: cannot build a PDF: no usable markdown-pdf venv and no pandoc.\n"
             "Fix one of:\n"
-            "  1) Install venv support and re-run (it bootstraps itself):\n"
-            "       Debian/Ubuntu: sudo apt install python3-venv\n"
-            "       Fedora:        sudo dnf install python3-pip\n"
-            f"  2) pip install --user {PIN}  (then set {VENV_OVERRIDE_ENV} to a venv you control)\n"
+            "  1) Install venv support with your system package manager and re-run (it bootstraps itself).\n"
+            f"  2) Create a venv, install {PIN} and {PYMUPDF_PIN} into it, then set\n"
+            f"     {VENV_OVERRIDE_ENV} to that venv and re-run.\n"
             "  3) Install pandoc plus weasyprint (or wkhtmltopdf) and re-run.\n"
             f"The report markdown is still available at: {in_path}",
             1,

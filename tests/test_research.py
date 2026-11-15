@@ -352,6 +352,65 @@ def test_plan_validation_errors(tmp_path, monkeypatch, capsys, plan, expected):
     assert expected in err
 
 
+def test_max_chars_env_default_and_cli_override(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    monkeypatch.setenv(research.BACKOFF_ENV, "0")
+    monkeypatch.delenv(research.MAX_CHARS_ENV, raising=False)
+    seen: list[int] = []
+
+    def fake(query, num_results, max_chars, _api_key):
+        seen.append(max_chars)
+        return [], 0.0
+
+    monkeypatch.setattr(research, "_run_query", fake)
+    work = make_work(tmp_path, plan_of(("q1", ["a"])))
+
+    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+    assert seen == [6000]
+    assert research.default_max_chars() == 6000
+
+    seen.clear()
+    monkeypatch.setenv(research.MAX_CHARS_ENV, "2000")
+    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+    assert seen == [2000]
+    assert research.default_max_chars() == 2000
+
+    seen.clear()
+    code, _out, err = run_cli(["search", "--work", str(work), "--max-chars", "1500"], capsys)
+    assert code == 0, err
+    assert seen == [1500]
+
+    monkeypatch.setenv(research.MAX_CHARS_ENV, "not-a-number")
+    assert research.default_max_chars() == 6000
+    monkeypatch.setenv(research.MAX_CHARS_ENV, "0")
+    assert research.default_max_chars() == 6000
+
+
+def test_exa_key_precedence(monkeypatch):
+    monkeypatch.delenv(research.MOCK_ENV, raising=False)
+    monkeypatch.setenv("DEEP_RESEARCH_EXA_KEY", "dedicated")
+    monkeypatch.setenv("EXA_API_KEY", "legacy")
+    assert research.exa_key_required() == "dedicated"
+    monkeypatch.delenv("DEEP_RESEARCH_EXA_KEY")
+    assert research.exa_key_required() == "legacy"
+
+
+def test_exa_search_payload_uses_max_chars_and_highlights(monkeypatch):
+    captured: dict = {}
+
+    def fake_post(url, payload, api_key, timeout=45.0):
+        captured.update(payload)
+        return {"results": [], "costDollars": {"total": 0.0}}
+
+    monkeypatch.setattr(research, "http_post_json", fake_post)
+    research.exa_search("query", 5, 2000, "key")
+    assert captured["numResults"] == 5
+    assert captured["contents"]["text"]["maxCharacters"] == 2000
+    assert captured["contents"]["highlights"] is True
+
+
 def test_plan_dry_run_ok(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
     work = make_work(tmp_path, plan_of(("q1", ["a", "b"]), ("q2", ["c"])))
@@ -366,7 +425,7 @@ def test_num_results_env_default_and_cli_override(tmp_path, monkeypatch, capsys)
     monkeypatch.delenv(research.NUM_RESULTS_ENV, raising=False)
     seen: list[tuple[str, int]] = []
 
-    def fake(query, num_results, _api_key):
+    def fake(query, num_results, _max_chars, _api_key):
         seen.append((query, num_results))
         return [], 0.0
 
@@ -569,15 +628,29 @@ def test_fetch_stores_full_text(tmp_path, monkeypatch, capsys):
 
 def test_missing_exa_key_is_actionable(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv(research.MOCK_ENV, raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_EXA_KEY", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     work = make_work(tmp_path, plan_of(("q1", ["a"])))
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 2
-    assert "EXA_API_KEY is not set" in err
-    assert "~/.hermes/.env" in err
+    assert "DEEP_RESEARCH_EXA_KEY is not set" in err
+    assert "hermes config set DEEP_RESEARCH_EXA_KEY" in err
 
 
 def test_invalid_slug_rejected(tmp_path, capsys):
     code, _out, err = run_cli(["init", "--slug", "Bad Slug!"], capsys)
     assert code == 2
     assert "invalid slug" in err
+
+
+def test_md_to_pdf_reexec_uses_in_venv_flag(tmp_path, monkeypatch):
+    import md_to_pdf
+
+    markdown = tmp_path / "report.md"
+    markdown.write_text("# Report\n\nBody.\n", encoding="utf-8")
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(md_to_pdf, "venv_ready", lambda: True)
+    monkeypatch.setattr(md_to_pdf.os, "execv", lambda path, argv: calls.append((path, argv)))
+    code = md_to_pdf.main([str(markdown)])
+    assert code == 1  # os.execv was stubbed and returned
+    assert calls and calls[0][1][2] == md_to_pdf.IN_VENV_FLAG
