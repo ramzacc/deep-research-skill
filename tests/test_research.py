@@ -756,7 +756,7 @@ def test_finalize_missing_required_sections_exits_1(tmp_path, capsys):
 def test_finalize_warns_on_long_report(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
-    body = " ".join(["word"] * 5005)
+    body = " ".join(["word"] * 9005)
     draft.write_text(
         "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Qué hacer\n\n## No verificado\n",
         encoding="utf-8",
@@ -768,6 +768,22 @@ def test_finalize_warns_on_long_report(tmp_path, capsys):
     assert code == 0
     assert "warning: report is" in err
     assert "word" in err
+
+
+def test_finalize_allows_medium_long_report(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    body = " ".join(["word"] * 5005)
+    draft.write_text(
+        "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    code, _out, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(tmp_path / "f.md")],
+        capsys,
+    )
+    assert code == 0
+    assert "warning: report is" not in err
 
 
 def test_finalize_warns_on_past_deadline(tmp_path, capsys):

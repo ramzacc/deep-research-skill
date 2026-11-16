@@ -5,7 +5,8 @@
 <!-- WRITE THE TITLE AND EVERY HEADING IN THE LANGUAGE OF THE USER'S REQUEST.
      English headings: Summary · Disagreements & uncertainties · Not verified · What to do · Assumptions · Methodology
      Spanish headings: Resumen · Contradicciones e incertidumbres · No verificado · Qué hacer · Supuestos · Metodología
-     Target: <= 4,500 words. Do not add a References/Referencias section; finalize adds it. -->
+     No padding; typically 4,000-7,000 words. Do not add a References/Referencias section;
+     finalize adds it. -->
 
 ## Summary
 

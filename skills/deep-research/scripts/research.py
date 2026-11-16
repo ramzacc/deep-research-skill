@@ -1245,9 +1245,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     new_text = CITE_RE.sub(replace, body)
     warnings: list[str] = []
     word_count = _word_count(text)
-    if word_count > 5000:
+    if word_count > 9000:
         warnings.append(
-            f"warning: report is {word_count} words (target <= 4500, hard warning above 5000)"
+            f"warning: report is {word_count} words (no fixed target; a typical report is "
+            "4,000-7,000 words; warning above 9,000)"
         )
     warnings.extend(_date_warnings(text))
     for warning in warnings:

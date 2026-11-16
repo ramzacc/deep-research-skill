@@ -318,7 +318,7 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    prose: whenever you compare options, amounts, requirements, deadlines, steps or risks, put
    them in a markdown table (one row per option, one column per attribute, citations inside
    the cells) and keep the prose around it to 1-3 sentences that say what the table means.
-   Keep the whole report at or below 4,500 words. Do not leave HTML comments in the body. Do
+   Do not pad: a typical report is 4,000-7,000 words. Do not leave HTML comments in the body. Do
    not add a References heading — `finalize` adds the localized one.
 
 ## Step 6 — Finalize
@@ -340,7 +340,7 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
 - `error: the draft is missing required sections` → add the listed sections in the report
   language (`Summary`/`Resumen`, `What to do`/`Qué hacer`, `Not verified`/`No verificado`)
   and re-run.
-- `warning: report is ... words` → cut padding and tighten to at most 4,500 words.
+- `warning: report is ... words` → cut padding; a typical report is 4,000-7,000 words.
 - `warning: line ... mentions a deadline date in the past` → do not present it as actionable;
   mark it `date_status: "past"`, and give the next cycle only if a source shows one.
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
