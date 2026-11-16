@@ -609,6 +609,7 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
     log = read_log(work if work_original else None)
 
     asks = plan.get("asks") or []
+    post_actions = plan.get("post_actions") or []
     covers = [
         cover for item in (plan.get("subquestions") or [])
         for cover in (item.get("covers") or [])
@@ -763,6 +764,7 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "n_subquestions": len(plan.get("subquestions") or []),
         "n_asks": len(asks),
         "n_covered_asks": len(covered_asks),
+        "n_post_actions": len(post_actions),
         "findings_total": findings_total,
         "findings_verified": findings_verified,
         "findings_date_status": findings_date_status,
@@ -820,7 +822,8 @@ def render_stats_md(stats: dict) -> str:
         "",
         "## Pipeline",
         f"- subquestions: {stats['n_subquestions']} · asks covered: "
-        f"{stats.get('n_covered_asks', 0)}/{stats.get('n_asks', 0)}",
+        f"{stats.get('n_covered_asks', 0)}/{stats.get('n_asks', 0)} · "
+        f"post_actions: {stats.get('n_post_actions', 0)}",
         f"- queries: {stats['n_queries_batch']} batch + {stats['n_queries_adhoc']} ad-hoc, "
         f"fetches: {stats['n_fetches']}",
         f"- findings: {stats.get('findings_total', 0)} total, "
