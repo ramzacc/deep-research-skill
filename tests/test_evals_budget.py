@@ -54,3 +54,12 @@ def test_ordered_runs_rep_then_topic_with_stable_config_order():
     second = [(topic["id"], config) for topic, config, rep in runs if rep == 2]
     assert first == second
     assert sorted(config for _topic, config in first if _topic == "one") == ["A", "B", "C"]
+
+
+def test_media_line_accepts_markdown(tmp_path):
+    runner = load_runner()
+    report = tmp_path / "report.md"
+    report.write_text("# Report\n", encoding="utf-8")
+    target, valid = runner.media_line(f"Done.\nMEDIA:{report}\n")
+    assert valid is True
+    assert target == str(report)
