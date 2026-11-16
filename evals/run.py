@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import fcntl
 import json
 import os
 import random
