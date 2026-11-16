@@ -51,6 +51,13 @@ FOLLOWUP_BUDGET_ANCHOR = (
     "  least 2, at most 4 pages."
 )
 QUERIES_RULE_ANCHOR = "- 3-5 queries per subquestion."
+SERPER_DECLARATION_ANCHOR = (
+    "required_environment_variables:\n"
+    "  - name: DEEP_RESEARCH_EXA_KEY\n"
+    "    prompt: Exa API key for search and page fetching\n"
+    "    help: Same value as your Exa API key. Set it with `hermes config set DEEP_RESEARCH_EXA_KEY <key>`.\n"
+    "    required_for: web search and page fetching\n"
+)
 STEP4_START = "## Step 4 — Depth (delegated researchers)"
 STEP5_START = "## Step 5 — Synthesize"
 
@@ -142,6 +149,24 @@ CONFIGS: dict[str, dict] = {
         "followups": {"searches": 2, "fetches": 6},
         "delegate": True,
     },
+    "G": {
+        "description": "cheap Exa: B breadth, 8 results/query, Exa /search type=lite",
+        "subquestions": {"min": 4, "max": 8, "target": 6},
+        "num_results": 8,
+        "delegate": True,
+        "env": {"DEEP_RESEARCH_EXA_TYPE": "lite"},
+    },
+    "H": {
+        "description": "cheapest: B breadth, 8 results/query, Serper search + Exa text for top 5 new results/query",
+        "subquestions": {"min": 4, "max": 8, "target": 6},
+        "num_results": 8,
+        "delegate": True,
+        "env": {
+            "DEEP_RESEARCH_SEARCH_PROVIDER": "serper",
+            "DEEP_RESEARCH_CONTENT_TOP": "5",
+        },
+        "declare_serper_key": True,
+    },
 }
 
 
@@ -223,6 +248,18 @@ def patched_skill_md(config: str) -> str:
             f"{'exactly' if searches == 2 and fetches == 2 else 'at least 2, at most'} "
             f"{fetches} pages.",
             f"{config} follow-up budget",
+        )
+
+    if spec.get("declare_serper_key"):
+        text = replace_exact(
+            text,
+            SERPER_DECLARATION_ANCHOR,
+            SERPER_DECLARATION_ANCHOR
+            + "  - name: DEEP_RESEARCH_SERPER_KEY\n"
+              "    prompt: Serper API key for search\n"
+              "    help: Set it with `hermes config set DEEP_RESEARCH_SERPER_KEY <key>`.\n"
+              "    required_for: web search\n",
+            f"{config} serper key declaration",
         )
 
     if not spec["delegate"]:
