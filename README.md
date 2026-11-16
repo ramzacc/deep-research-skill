@@ -96,7 +96,9 @@ which step to continue from.
 5. The agent synthesizes `draft.md` from `templates/report.md`.
 6. `research.py finalize` validates every citation, renumbers them `[1]`, `[2]`, ... in order
    of first appearance, turns them into clickable links, and appends `## References`.
-7. The reply ends with `MEDIA:/abs/path/<slug>.md`.
+7. The agent runs every `post_actions` item from `plan.json` (for example, updating a Todoist
+   task with the summary and report path).
+8. The reply ends with `MEDIA:/abs/path/<slug>.md` and confirms each post-action.
 
 Manual commands (same as the skill uses):
 
