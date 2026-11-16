@@ -103,7 +103,7 @@ Rules:
   wrote on forum X", this is an artifact: the subject is the canonical document, not the forum
   thread that mentions it.
 - `post_actions`: optional list, default `[]`. Record every follow-up action the user asked for
-  with the results, verbatim intent (for example "update my Todoist task Y with the results" or
+  with the results, verbatim intent (for example "update task Y with the results" or
   "write the report path to ~/done.txt"). The post-actions step runs them after finalize; they
   must survive the background-researcher wake, so re-read plan.json (or run `status`) later.
 - If `identify` is non-empty, `q1` MUST be exactly:
@@ -342,7 +342,7 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
 ## Step 7 — Post-actions
 
 Re-read `<WORK>/plan.json` (or run `status`) and take its `post_actions` list. Run every item
-with your available tools. Example: update the Todoist task: put the Summary bullets and the
+with your available tools. Example: to update a task, put the Summary bullets and the
 report path in the task description/comment.
 If a tool is missing or fails, do not stop; note it for the final reply.
 
