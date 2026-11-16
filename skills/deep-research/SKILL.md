@@ -141,6 +141,7 @@ Filled-in example (3 of 4+ subquestions shown):
   ],
   "user_context": "Policy analyst; needs a short brief, not legal advice.",
   "identify": [],
+  "post_actions": [],
   "subquestions": [
     {"id": "q1", "question": "What obligations does the EU AI Act impose, and which apply in 2025?",
      "queries": ["EU AI Act obligations timeline 2025", "AI Act prohibited practices February 2025",
