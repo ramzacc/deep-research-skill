@@ -218,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
 
         topic_dir = blind / topic
         topic_dir.mkdir(exist_ok=True)
-        for run in candidates:
+        existing_runs = [run for run in candidates if run["stats"]["run_id"] in existing_by_run]
+        for run in existing_runs + new_runs:
             rid = run["stats"]["run_id"]
             label = existing_by_run.get(rid)
             if label is None:
