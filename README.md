@@ -32,6 +32,7 @@ hermes skills update deep-research
 | Requirement | Why |
 |---|---|
 | `DEEP_RESEARCH_EXA_KEY` | search + page fetching (the skill calls Exa's REST API directly) |
+| `DEEP_RESEARCH_DEEPSEEK_KEY` (optional) | search + page fetching when `DEEP_RESEARCH_SEARCH_PROVIDER=deepseek` |
 | `terminal` toolset enabled | runs `research.py` |
 | Python 3.10+ | the script is stdlib-only |
 | `delegate_task` (optional but recommended) | parallel per-subquestion researchers |
@@ -50,6 +51,9 @@ value on the next turn; start a new CLI chat after setting it.
 
 Declared skill variables are passed to the terminal sandbox by Hermes; Hermes-managed provider
 credentials are not.
+
+To use DeepSeek instead of Exa, set `DEEP_RESEARCH_SEARCH_PROVIDER=deepseek` and
+`hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`; `DEEP_RESEARCH_EXA_KEY` is then unused.
 
 Recommended delegation setting in `~/.hermes/config.yaml` so a full batch runs at once:
 
@@ -128,8 +132,10 @@ citation coverage.
 | Symptom | Fix |
 |---|---|
 | `DEEP_RESEARCH_EXA_KEY is not set` | run `hermes config set DEEP_RESEARCH_EXA_KEY <key>`, then re-run |
-| `HTTP 401/403` | invalid/expired Exa key |
-| `HTTP 429` after retries | Exa rate limit; lower `--workers` (default 8) or retry later |
+| `DEEP_RESEARCH_DEEPSEEK_KEY is not set` | provider is `deepseek`; run `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>` |
+| `HTTP 401/403` | invalid/expired search-provider key |
+| `HTTP 402` | insufficient DeepSeek balance; top up the account |
+| `HTTP 429` after retries | provider rate limit; lower `--workers` (default 8) or retry later |
 | `plan.json is invalid` | the error lists exact fields; validate with `search --dry-run` |
 | `unknown source ids` from `finalize` | the draft cites an id that is not in `sources.json`; remove the claim or search for real evidence — never invent ids |
 | Research stops mid-run | ask "continue the research"; the agent runs `status` and resumes from the work dir |
@@ -146,9 +152,10 @@ python3 -m pytest -q tests
 Tests are fully offline. The HTTP layer is replaced by a JSON fixture selected with the
 **test-only** environment variables:
 
-- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search`, Exa `/contents`
-  and Serper `/search` responses (`endpoint: "serper"`; supports status codes, per-route
-  response sequences, and artificial `delay`).
+- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search`, Exa `/contents`,
+  Serper `/search` and DeepSeek `/tools/search` + `/tools/fetch` responses
+  (`endpoint: "serper"` / `"deepseek"`; supports status codes, per-route response
+  sequences, and artificial `delay`).
 - `DEEP_RESEARCH_BACKOFF_BASE=0` — disables retry sleeps in tests.
 
 Production knobs:
@@ -156,10 +163,14 @@ Production knobs:
 - `DEEP_RESEARCH_EXA_KEY` — the Exa key used by the scripts (falls back to `EXA_API_KEY`).
 - `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 8; `--num-results` wins).
 - `DEEP_RESEARCH_MAX_CHARS` — page-text characters per source (default 6000; `--max-chars` wins).
-- `DEEP_RESEARCH_SEARCH_PROVIDER` — `exa` (default) or `serper`. Serper mode searches
-  Google via Serper, stores the snippet as each source's highlight, then fetches page text
-  for the top new results with Exa `/contents`.
+- `DEEP_RESEARCH_SEARCH_PROVIDER` — `exa` (default), `serper` or `deepseek`. Serper mode
+  searches Google via Serper, stores the snippet as each source's highlight, then fetches
+  page text for the top new results with Exa `/contents`. DeepSeek mode uses DeepSeek's
+  Search & Fetch API for both, at $0.00075 per successful request; `site:` operators stay
+  in the query and authority/rerank scores are kept when returned.
 - `DEEP_RESEARCH_SERPER_KEY` — Serper API key; required when the provider is `serper`.
+- `DEEP_RESEARCH_DEEPSEEK_KEY` — DeepSeek API key; required when the provider is
+  `deepseek`. No Exa key is needed in that mode.
 - `DEEP_RESEARCH_EXA_TYPE` — Exa `/search` type: `auto` (default) or the cheaper `lite`.
 - `DEEP_RESEARCH_CONTENT_TOP` — in Serper mode, page texts fetched per query (default 5;
   `0` disables content fetching, leaving snippet-only sources).

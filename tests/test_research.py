@@ -1177,3 +1177,229 @@ def test_serper_without_key_exits_2(tmp_path, monkeypatch, capsys):
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 2
     assert research.SERPER_KEY_ENV in err
+
+
+# --------------------------------------------------------------------------
+# i. DeepSeek Search & Fetch provider
+# --------------------------------------------------------------------------
+
+def deepseek_ok(items: list[dict]) -> dict:
+    return {"status": 200, "json": {"results": items}}
+
+
+def deepseek_item(url: str, title: str = "Title", snippet: str = "A snippet.",
+                  summary: str = "", content: str = "Body text.", date: str | None = None,
+                  authority: int | None = None, rerank: float | None = None) -> dict:
+    item = {
+        "url": url,
+        "title": title,
+        "snippet": snippet,
+        "summary": summary,
+        "content": content,
+        "date": date,
+    }
+    if authority is not None:
+        item["authority"] = authority
+    if rerank is not None:
+        item["rerank_score"] = rerank
+    return item
+
+
+def use_deepseek(monkeypatch, fixture: Path, key: str = "test-deepseek-key") -> None:
+    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
+    monkeypatch.setenv(research.BACKOFF_ENV, "0")
+    monkeypatch.setenv(research.SEARCH_PROVIDER_ENV, "deepseek")
+    monkeypatch.setenv(research.DEEPSEEK_KEY_ENV, key)
+    monkeypatch.delenv("DEEP_RESEARCH_EXA_KEY", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+
+
+def test_deepseek_batch_payload_mapping_dedupe_and_cost(tmp_path, monkeypatch, capsys):
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "deepseek", "contains": "site:gob.pe",
+         "responses": [deepseek_ok([
+             deepseek_item("https://shared.example/a/#1", title="Shared",
+                           summary="Summary one.", snippet="Snippet one.",
+                           content="Full content one.", date="2025-03-04T10:00:00Z",
+                           authority=3, rerank=2.5),
+             deepseek_item("https://second.example/b#1#1", title="Second",
+                           snippet="Second snippet.", content="Second content."),
+         ])]},
+        {"endpoint": "deepseek", "contains": "query two",
+         "responses": [deepseek_ok([
+             deepseek_item("https://shared.example/a#cite_note-1#1", title="Shared again",
+                           summary="Summary two.", content="Later content."),
+             deepseek_item("https://third.example/c", title="Third", content="Third content."),
+         ])]},
+    ])
+    use_deepseek(monkeypatch, fixture)
+    calls = capture_http(monkeypatch)
+    work = make_work(tmp_path, plan_of(("q1", ["site:gob.pe tariff"]), ("q2", ["query two"])))
+
+    code, out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+
+    search_calls = [call for call in calls if call["url"] == research.DEEPSEEK_SEARCH_URL]
+    payloads = sorted((call["payload"] for call in search_calls), key=lambda payload: payload["query"])
+    assert payloads == [
+        {"query": "query two", "count": 8, "need_content": True},
+        {"query": "site:gob.pe tariff", "count": 8, "need_content": True},
+    ]
+    assert all(call["headers"] == {"Authorization": "Bearer test-deepseek-key"}
+               for call in search_calls)
+
+    registry = load_sources(work)
+    by_url = {src["url"]: src for src in registry["sources"]}
+    assert set(by_url) == {
+        "https://shared.example/a/", "https://second.example/b", "https://third.example/c",
+    }
+    assert all("#" not in url for url in by_url)
+    shared = by_url["https://shared.example/a/"]
+    assert shared["id"] == "S1"
+    assert shared["subquestions"] == ["q1", "q2"]
+    assert shared["highlights"][0] == "Summary one."
+    assert shared["text"] == "Full content one."
+    assert shared["published"] == "2025-03-04T10:00:00Z"
+    assert shared["authority"] == 3
+    assert shared["rerank"] == 2.5
+    assert registry["cost_dollars"] == pytest.approx(0.0015, abs=1e-9)
+
+    evidence = (work / "evidence" / "q1.md").read_text(encoding="utf-8")
+    assert "· authority 3" in evidence
+    assert "· rerank 2.5" in evidence
+    assert "Summary one." in evidence
+    assert "Full content one." in evidence
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert {event["provider"] for event in events} == {"deepseek"}
+    assert sum(event["cost"] for event in events) == pytest.approx(0.0015, abs=1e-9)
+    assert "run cost: $0.0015" in out
+
+
+def test_deepseek_empty_results_cost_zero(tmp_path, monkeypatch, capsys):
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "deepseek", "contains": "empty query", "responses": [deepseek_ok([])]},
+    ])
+    use_deepseek(monkeypatch, fixture)
+    work = make_work(tmp_path, plan_of(("q1", ["empty query"])))
+
+    code, out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+    registry = load_sources(work)
+    assert registry["sources"] == []
+    assert registry["cost_dollars"] == 0.0
+    assert "run cost: $0.0000" in out
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["ok"] is True
+    assert events[-1]["cost"] == 0.0
+    assert events[-1]["provider"] == "deepseek"
+
+
+def test_deepseek_long_query_truncated_at_word_boundary(monkeypatch, capsys):
+    captured: dict = {}
+
+    def fake_post(url, payload, api_key=None, timeout=45.0, headers=None):
+        captured.update(payload)
+        return {"results": []}
+
+    monkeypatch.setattr(research, "http_post_json", fake_post)
+    query = " ".join(["abcdefghij"] * 20)
+    assert len(query) > 128
+    results, cost = research.deepseek_search(query, 8, 6000, "key")
+
+    sent = captured["query"]
+    assert 0 < len(sent) <= research.DEEPSEEK_MAX_QUERY_CHARS
+    assert all(len(word) == 10 for word in sent.split(" "))
+    assert not sent.endswith(" ")
+    assert results == [] and cost == 0.0
+    assert "at most 128" in capsys.readouterr().err
+
+
+def test_deepseek_fetch_stores_text_and_costs(tmp_path, monkeypatch, capsys):
+    content = "FULL PAGE " * 100
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "deepseek", "contains": "one.example",
+         "responses": [{"status": 200, "json": {"title": "Fetched", "content": content}}]},
+    ])
+    use_deepseek(monkeypatch, fixture)
+    calls = capture_http(monkeypatch)
+    work = make_work(tmp_path)
+    write_registry(work, [source("S1", "https://one.example/a")])
+
+    code, out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "500"], capsys
+    )
+    assert code == 0, err
+    assert "FULL PAGE" in out
+    assert [call["url"] for call in calls] == [research.DEEPSEEK_FETCH_URL]
+    assert calls[0]["payload"] == {"url": "https://one.example/a"}
+    assert calls[0]["headers"] == {"Authorization": "Bearer test-deepseek-key"}
+    registry = load_sources(work)
+    assert registry["sources"][0]["text"] == content[:500]
+    assert registry["cost_dollars"] == pytest.approx(0.00075, abs=1e-9)
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["op"] == "fetch"
+    assert events[-1]["provider"] == "deepseek"
+    assert events[-1]["cost"] == pytest.approx(0.00075, abs=1e-9)
+
+
+def test_deepseek_fetch_404_exits_nonzero(tmp_path):
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "deepseek", "contains": "gone.example",
+         "responses": [{"status": 404, "body": '{"error": {"message": "no content"}}'}]},
+    ])
+    work = make_work(tmp_path)
+    write_registry(work, [source("S1", "https://gone.example/x")])
+    env = dict(os.environ)
+    env[research.MOCK_ENV] = str(fixture)
+    env[research.BACKOFF_ENV] = "0"
+    env[research.SEARCH_PROVIDER_ENV] = "deepseek"
+    env[research.DEEPSEEK_KEY_ENV] = "test-deepseek-key"
+    env.pop("DEEP_RESEARCH_EXA_KEY", None)
+    env.pop("EXA_API_KEY", None)
+
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "fetch", "--work", str(work), "--id", "S1"],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode != 0
+    assert "HTTP 404" in proc.stderr
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["ok"] is False
+    assert events[-1]["provider"] == "deepseek"
+    assert "HTTP 404" in events[-1]["error"]
+
+
+def test_deepseek_402_reports_balance_without_retry(tmp_path, monkeypatch, capsys):
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "deepseek", "contains": "billing query",
+         "responses": [{"status": 402,
+                        "body": '{"error": {"message": "Insufficient Balance"}}'}]},
+    ])
+    use_deepseek(monkeypatch, fixture)
+    work = make_work(tmp_path, plan_of(("q1", ["billing query"])))
+
+    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 1
+    assert "insufficient balance" in err.lower()
+    assert "retry" not in err
+    assert load_sources(work)["sources"] == []
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["ok"] is False
+    assert "insufficient balance" in events[-1]["error"].lower()
+
+
+def test_deepseek_without_key_exits_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    monkeypatch.setenv(research.SEARCH_PROVIDER_ENV, "deepseek")
+    monkeypatch.delenv(research.DEEPSEEK_KEY_ENV, raising=False)
+    monkeypatch.delenv("DEEP_RESEARCH_EXA_KEY", raising=False)
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    work = make_work(tmp_path, plan_of(("q1", ["a"])))
+    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 2
+    assert research.DEEPSEEK_KEY_ENV in err

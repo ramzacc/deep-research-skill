@@ -4,8 +4,8 @@
 Subcommands
 -----------
 init      create the work dir for a slug and print the paths to use
-search    batch (plan.json) or ad-hoc (-subq/-query) Exa searches, merged on disk
-fetch     full text of one known source id, via /contents
+search    batch (plan.json) or ad-hoc (-subq/-query) web searches, merged on disk
+fetch     full text of one known source id
 finalize  validate + renumber citations, add References, write the final report
 status    show which pipeline steps are done (used to resume)
 
@@ -46,6 +46,10 @@ EXA_SEARCH_URL = "https://api.exa.ai/search"
 EXA_CONTENTS_URL = "https://api.exa.ai/contents"
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
 SERPER_USD_PER_CREDIT = 0.001
+DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
+DEEPSEEK_USD_PER_REQUEST = 0.00075
+DEEPSEEK_MAX_QUERY_CHARS = 128
 CONTENTS_BATCH_SIZE = 25
 TEXT_MAX_CHARS = 6000
 HIGHLIGHTS_PER_SOURCE = 8
@@ -70,7 +74,7 @@ DEFAULT_NUM_RESULTS = 8
 # Characters of page text per source. DEEP_RESEARCH_MAX_CHARS is the default; --max-chars wins.
 MAX_CHARS_ENV = "DEEP_RESEARCH_MAX_CHARS"
 DEFAULT_MAX_CHARS = TEXT_MAX_CHARS
-# Search backend: "exa" (default) or "serper".
+# Search backend: "exa" (default), "serper" or "deepseek".
 SEARCH_PROVIDER_ENV = "DEEP_RESEARCH_SEARCH_PROVIDER"
 DEFAULT_SEARCH_PROVIDER = "exa"
 # Exa /search type: "auto" (default) or the cheaper "lite".
@@ -80,6 +84,7 @@ DEFAULT_EXA_TYPE = "auto"
 CONTENT_TOP_ENV = "DEEP_RESEARCH_CONTENT_TOP"
 DEFAULT_CONTENT_TOP = 5
 SERPER_KEY_ENV = "DEEP_RESEARCH_SERPER_KEY"
+DEEPSEEK_KEY_ENV = "DEEP_RESEARCH_DEEPSEEK_KEY"
 LOG_FILE = "log.jsonl"
 QUERY_INDEX = "queries.json"
 SITE_TOKEN_RE = re.compile(r"\bsite:(\S+)", re.IGNORECASE)
@@ -236,6 +241,8 @@ def _mock_route(payload: dict, endpoint: str) -> dict | None:
     routes = fixture.get("routes") or []
     if endpoint == "serper":
         haystack = str(payload.get("q", ""))
+    elif endpoint == "deepseek":
+        haystack = str(payload.get("query", "") or payload.get("url", ""))
     elif endpoint == "search":
         haystack = str(payload.get("query", ""))
     else:
@@ -251,7 +258,8 @@ def _mock_route(payload: dict, endpoint: str) -> dict | None:
             continue
         matches.append((idx, route))
     if not matches:
-        default_key = {"contents": "default_contents", "serper": "default_serper"}.get(endpoint, "default")
+        default_key = {"contents": "default_contents", "serper": "default_serper",
+                       "deepseek": "default_deepseek"}.get(endpoint, "default")
         default = fixture.get(default_key)
         return {"responses": [default]} if default else None
     # most specific match wins: longest matched needle, then declaration order
@@ -284,6 +292,8 @@ def http_post_json(url: str, payload: dict, api_key: str | None = None, timeout:
     """POST JSON, return parsed JSON. Raises HttpError on any failure."""
     if url == SERPER_SEARCH_URL:
         endpoint = "serper"
+    elif url in (DEEPSEEK_SEARCH_URL, DEEPSEEK_FETCH_URL):
+        endpoint = "deepseek"
     else:
         endpoint = "contents" if url.endswith("/contents") else "search"
     if os.environ.get(MOCK_ENV):
@@ -367,9 +377,10 @@ def search_provider() -> str:
     raw = os.environ.get(SEARCH_PROVIDER_ENV, "").strip().lower()
     if not raw:
         return DEFAULT_SEARCH_PROVIDER
-    if raw not in ("exa", "serper"):
+    if raw not in ("exa", "serper", "deepseek"):
         die(
-            f"error: {SEARCH_PROVIDER_ENV}={raw!r} is invalid; choose 'exa' (default) or 'serper'.",
+            f"error: {SEARCH_PROVIDER_ENV}={raw!r} is invalid; "
+            "choose 'exa' (default), 'serper' or 'deepseek'.",
             2,
         )
     return raw
@@ -395,6 +406,18 @@ def serper_key_required() -> str:
             f"error: {SERPER_KEY_ENV} is not set.\n"
             "Serper mode needs a Serper API key:\n"
             f"  hermes config set {SERPER_KEY_ENV} <your key>",
+            2,
+        )
+    return key
+
+
+def deepseek_key_required() -> str:
+    key = os.environ.get(DEEPSEEK_KEY_ENV, "").strip()
+    if not key:
+        die(
+            f"error: {DEEPSEEK_KEY_ENV} is not set.\n"
+            "DeepSeek mode needs a DeepSeek API key:\n"
+            f"  hermes config set {DEEPSEEK_KEY_ENV} <your key>",
             2,
         )
     return key
@@ -508,6 +531,85 @@ def serper_search(query: str, num_results: int, api_key: str) -> tuple[list[dict
     except (TypeError, ValueError):
         cost = SERPER_USD_PER_CREDIT
     return results, cost
+
+
+def truncate_deepseek_query(query: str) -> str:
+    """Cut a query to DeepSeek's 128-character limit at a word boundary."""
+    if len(query) <= DEEPSEEK_MAX_QUERY_CHARS:
+        return query
+    cut = query[:DEEPSEEK_MAX_QUERY_CHARS]
+    boundary = cut.rfind(" ")
+    if boundary > 0:
+        cut = cut[:boundary]
+    cut = cut.rstrip()
+    note(
+        f"warning: query is {len(query)} chars; DeepSeek accepts at most "
+        f"{DEEPSEEK_MAX_QUERY_CHARS}; sending {len(cut)}"
+    )
+    return cut
+
+
+def _deepseek_post(url: str, payload: dict, api_key: str) -> dict:
+    try:
+        return http_post_json(url, payload, headers={"Authorization": f"Bearer {api_key}"})
+    except HttpError as exc:
+        if exc.status == 402:
+            raise HttpError(
+                402, "insufficient balance on the DeepSeek account; top up your balance"
+            ) from exc
+        raise
+
+
+def _strip_url_fragment(url: str) -> str:
+    """DeepSeek returns URLs with junk fragments like `page#1#1#1`; drop them."""
+    return str(url or "").split("#", 1)[0].strip()
+
+
+def deepseek_search(query: str, num_results: int, max_chars: int, api_key: str) -> tuple[list[dict], float]:
+    payload = {
+        "query": truncate_deepseek_query(query),
+        "count": num_results,
+        "need_content": True,
+    }
+    data = _deepseek_post(DEEPSEEK_SEARCH_URL, payload, api_key)
+    raw = data.get("results") or []
+    if not isinstance(raw, list):
+        raw = []
+    results: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        url = _strip_url_fragment(item.get("url", ""))
+        if not url:
+            continue
+        summary = str(item.get("summary") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        result = {
+            "url": url,
+            "title": str(item.get("title") or "").strip(),
+            "publishedDate": item.get("date") or "",
+            "highlights": [summary] if summary else ([snippet] if snippet else []),
+            "text": str(item.get("content") or "")[:max_chars],
+        }
+        authority = item.get("authority")
+        if isinstance(authority, int) and not isinstance(authority, bool) and authority >= 0:
+            result["authority"] = authority
+        rerank = item.get("rerank_score")
+        if isinstance(rerank, (int, float)) and not isinstance(rerank, bool):
+            result["rerank"] = rerank
+        results.append(result)
+    # A successful request with no results is not billed.
+    return results, (DEEPSEEK_USD_PER_REQUEST if raw else 0.0)
+
+
+def deepseek_fetch(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
+    data = _deepseek_post(DEEPSEEK_FETCH_URL, {"url": url}, api_key)
+    content = str(data.get("content") or "")
+    page = {
+        "title": str(data.get("title") or "").strip(),
+        "text": content[:max_chars],
+    }
+    return page, (DEEPSEEK_USD_PER_REQUEST if content else 0.0)
 
 
 def exa_contents_batch(urls: list[str], max_chars: int, api_key: str) -> tuple[list[dict], float]:
@@ -774,6 +876,9 @@ def merge_records(registry: dict, records: list[dict], changes: list[dict] | Non
                 src["published"] = item.get("publishedDate") or ""
             if not src.get("author"):
                 src["author"] = item.get("author") or ""
+            for field in ("authority", "rerank"):
+                if src.get(field) is None and item.get(field) is not None:
+                    src[field] = item[field]
             if qid and qid not in src["subquestions"]:
                 src["subquestions"].append(qid)
             if query and query not in src["queries"]:
@@ -819,6 +924,12 @@ def source_section(src: dict, max_text_chars: int) -> str:
     day = format_date(src.get("published"))
     when = f" ({day})" if day else ""
     lines = [f"### [{src['id']}] {src.get('title') or '(untitled)'}{when} — {src.get('url')}"]
+    header = lines[0]
+    if src.get("authority") is not None:
+        header += f" · authority {src['authority']}"
+    if src.get("rerank") is not None:
+        header += f" · rerank {src['rerank']:g}"
+    lines[0] = header
     for highlight in src.get("highlights") or []:
         lines.append(f"- {highlight}")
     text = re.sub(r"\s+", " ", str(src.get("text") or "")).strip()
@@ -1009,6 +1120,8 @@ def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api
     def run(query: str) -> tuple[list[dict], float]:
         if provider == "serper":
             return serper_search(query, args.num_results, api_key)
+        if provider == "deepseek":
+            return deepseek_search(query, args.num_results, args.max_chars, api_key)
         return _run_query(query, args.num_results, args.max_chars, api_key)
 
     workers = max(1, min(args.workers, len(pairs) or 1))
@@ -1096,6 +1209,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         if provider == "serper":
             api_key = serper_key_required()
             contents_key = exa_key_required() if content_top > 0 else ""
+        elif provider == "deepseek":
+            api_key = deepseek_key_required()
+            contents_key = ""
         else:
             api_key = exa_key_required()
             contents_key = ""
@@ -1232,17 +1348,23 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     src = source_by_id(registry, sid)
     if src is None:
         die(f"error: unknown source id {sid} in {work / 'sources.json'}", 1)
-    api_key = exa_key_required()
     max_chars = max(500, int(args.max_chars))
     note(f"fetching {sid}: {src['url']}")
+    provider = search_provider()
+    if provider == "deepseek":
+        api_key = deepseek_key_required()
+        fetcher = lambda: deepseek_fetch(src["url"], max_chars, api_key)
+        label = f"DeepSeek fetch {sid}"
+    else:
+        api_key = exa_key_required()
+        fetcher = lambda: exa_contents(src["url"], max_chars, api_key)
+        label = f"contents {sid}"
     try:
-        page, cost = with_retries(
-            lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}"
-        )
+        page, cost = with_retries(fetcher, 3, label)
     except HttpError as exc:
         append_log(work, {
             "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-            "fetched_id": sid, "cost": None, "ok": False, "error": str(exc),
+            "fetched_id": sid, "provider": provider, "cost": None, "ok": False, "error": str(exc),
         })
         raise
     text = str(page.get("text") or "")
@@ -1259,10 +1381,11 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         write_json_atomic(work / "sources.json", registry)
     append_log(work, {
         "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-        "fetched_id": sid, "cost": round(cost, 6), "ok": True, "error": None,
+        "fetched_id": sid, "provider": provider, "cost": round(cost, 6), "ok": True, "error": None,
     })
     print(f"[{sid}] {page.get('title') or src.get('title') or ''} — {src['url']}")
-    print(text or "(no text returned by /contents)")
+    fallback = "(no text returned by DeepSeek fetch)" if provider == "deepseek" else "(no text returned by /contents)"
+    print(text or fallback)
     return 0
 
 
@@ -1777,7 +1900,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="research.py",
-        description="Deterministic deep-research pipeline helper (Exa REST + local files).",
+        description="Deterministic deep-research pipeline helper (Exa/Serper/DeepSeek + local files).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Typical flow:\n"
