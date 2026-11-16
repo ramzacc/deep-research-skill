@@ -111,6 +111,10 @@ def load_sources(work: Path) -> dict:
     return json.loads((work / "sources.json").read_text(encoding="utf-8"))
 
 
+def reset_query_index(work: Path) -> None:
+    (work / research.QUERY_INDEX).unlink(missing_ok=True)
+
+
 # --------------------------------------------------------------------------
 # a. URL normalization / dedupe
 # --------------------------------------------------------------------------
@@ -417,6 +421,49 @@ def test_identify_requires_q1_identification_question(tmp_path, monkeypatch, cap
     assert code == 0, err
 
 
+def test_normalize_query_ignores_case_whitespace_and_punctuation():
+    assert research.normalize_query("  What is X?  ") == "what is x"
+    assert research.normalize_query("what   is   x") == "what is x"
+    assert research.normalize_query("WHAT, IS: X!") == "what is x"
+
+
+def test_duplicate_queries_cost_nothing(tmp_path, monkeypatch, capsys):
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "search", "contains": "Same query?",
+         "responses": [ok_response([hit("https://one.example/a")], cost=0.01)]},
+    ])
+    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
+    monkeypatch.setenv(research.BACKOFF_ENV, "0")
+    work = make_work(tmp_path, plan_of(("q1", ["Same query?"]), ("q2", ["same   query"])))
+    code, out, err = run_cli(["search", "--work", str(work)], capsys)
+    assert code == 0, err
+    assert "skipped duplicate: same   query" in out
+    assert "queries: 1 ok, 0 failed, 1 skipped duplicate(s)" in out
+    registry = load_sources(work)
+    assert registry["cost_dollars"] == 0.01
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert len(events) == 1
+    assert events[0]["op"] == "search_batch"
+
+
+def test_adhoc_duplicate_after_batch_is_skipped(tmp_path, monkeypatch, capsys):
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "search", "contains": "same query",
+         "responses": [ok_response([hit("https://one.example/a")], cost=0.01)]},
+    ])
+    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
+    monkeypatch.setenv(research.BACKOFF_ENV, "0")
+    work = make_work(tmp_path, plan_of(("q1", ["same query"])))
+    assert run_cli(["search", "--work", str(work)], capsys)[0] == 0
+    code, out, err = run_cli(
+        ["search", "--work", str(work), "--subq", "q1", "--query", "SAME query!"], capsys
+    )
+    assert code == 0, err
+    assert "skipped duplicate: SAME query!" in out
+    assert load_sources(work)["cost_dollars"] == 0.01
+
+
 def test_max_chars_env_default_and_cli_override(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
     monkeypatch.setenv(research.BACKOFF_ENV, "0")
@@ -436,6 +483,7 @@ def test_max_chars_env_default_and_cli_override(tmp_path, monkeypatch, capsys):
     assert research.default_max_chars() == 6000
 
     seen.clear()
+    reset_query_index(work)
     monkeypatch.setenv(research.MAX_CHARS_ENV, "2000")
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 0, err
@@ -443,6 +491,7 @@ def test_max_chars_env_default_and_cli_override(tmp_path, monkeypatch, capsys):
     assert research.default_max_chars() == 2000
 
     seen.clear()
+    reset_query_index(work)
     code, _out, err = run_cli(["search", "--work", str(work), "--max-chars", "1500"], capsys)
     assert code == 0, err
     assert seen == [1500]
@@ -503,6 +552,7 @@ def test_num_results_env_default_and_cli_override(tmp_path, monkeypatch, capsys)
     assert research.default_num_results() == 8
 
     seen.clear()
+    reset_query_index(work)
     monkeypatch.setenv(research.NUM_RESULTS_ENV, "10")
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 0, err
@@ -510,6 +560,7 @@ def test_num_results_env_default_and_cli_override(tmp_path, monkeypatch, capsys)
     assert research.default_num_results() == 10
 
     seen.clear()
+    reset_query_index(work)
     code, _out, err = run_cli(["search", "--work", str(work), "--num-results", "3"], capsys)
     assert code == 0, err
     assert sorted(seen) == [("a", 3), ("b", 3)]

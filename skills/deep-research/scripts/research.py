@@ -68,6 +68,7 @@ DEFAULT_NUM_RESULTS = 8
 MAX_CHARS_ENV = "DEEP_RESEARCH_MAX_CHARS"
 DEFAULT_MAX_CHARS = TEXT_MAX_CHARS
 LOG_FILE = "log.jsonl"
+QUERY_INDEX = "queries.json"
 
 _MOCK_CACHE: dict[str, tuple[float, dict]] = {}
 _MOCK_STATE: dict[str, dict] = {}
@@ -452,6 +453,53 @@ def append_log(work: Path, record: dict) -> None:
         note(f"warning: could not append to {work / LOG_FILE}: {exc}")
 
 
+def normalize_query(query: str) -> str:
+    """Case/whitespace/punctuation-insensitive key for the duplicate guard."""
+    lowered = str(query or "").lower()
+    cleaned = re.sub(r"[^\w\s]", " ", lowered, flags=re.UNICODE)
+    return " ".join(cleaned.split())
+
+
+def load_query_index(work: Path) -> dict:
+    path = work / QUERY_INDEX
+    if not path.exists():
+        return {"queries": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        note(f"warning: ignoring unreadable {path}: {exc}")
+        return {"queries": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("queries"), dict):
+        return {"queries": {}}
+    return data
+
+
+def reserve_queries(work: Path, queries: list[str]) -> tuple[list[str], list[str]]:
+    """Reserve new queries under the source lock; return (new, skipped duplicates).
+
+    Reserving before the API call keeps two concurrent ad-hoc researchers from
+    paying for the same query. A reserved query that fails remains reserved.
+    """
+    new: list[str] = []
+    skipped: list[str] = []
+    with sources_lock(work):
+        data = load_query_index(work)
+        index = data.setdefault("queries", {})
+        for query in queries:
+            key = normalize_query(query)
+            if key in index:
+                skipped.append(query)
+                continue
+            index[key] = {"query": query, "at": utcnow()}
+            new.append(query)
+        data["updated"] = utcnow()
+        try:
+            write_json_atomic(work / QUERY_INDEX, data)
+        except OSError as exc:
+            note(f"warning: could not write {work / QUERY_INDEX}: {exc}")
+    return new, skipped
+
+
 def merge_records(registry: dict, records: list[dict], changes: list[dict] | None = None) -> tuple[list[str], list[str]]:
     """Merge search records into the registry in place.
 
@@ -811,9 +859,23 @@ def cmd_search(args: argparse.Namespace) -> int:
             for qid in sorted(counts, key=lambda q: int(q[1:])):
                 print(f"  {qid}: {counts[qid]} queries")
         return 0
-    api_key = exa_key_required()
-    note(f"searching: {len(pairs)} queries with {args.workers} workers")
-    records, failures = _execute_queries(pairs, args, api_key)
+    api_key = exa_key_required() if pairs else ""
+    new_queries, skipped = reserve_queries(work, [query for _qid, query in pairs])
+    for query in skipped:
+        print(f"skipped duplicate: {query}")
+    remaining: dict[str, int] = {}
+    for query in new_queries:
+        remaining[query] = remaining.get(query, 0) + 1
+    effective_pairs = []
+    for qid, query in pairs:
+        if remaining.get(query, 0) > 0:
+            effective_pairs.append((qid, query))
+            remaining[query] -= 1
+    if effective_pairs:
+        note(f"searching: {len(effective_pairs)} queries with {args.workers} workers")
+        records, failures = _execute_queries(effective_pairs, args, api_key)
+    else:
+        records, failures = [], 0
 
     with sources_lock(work):
         registry = load_registry(work / "sources.json", slug)
@@ -827,18 +889,19 @@ def cmd_search(args: argparse.Namespace) -> int:
         write_json_atomic(work / "sources.json", registry)
 
     if adhoc:
-        errors = [rec["error"] for rec in records if rec.get("error")]
-        append_log(work, {
-            "op": "search_adhoc",
-            "subq": args.subq,
-            "queries": [query for _qid, query in pairs],
-            "new_ids": new_ids,
-            "matched_ids": touched,
-            "fetched_id": None,
-            "cost": round(run_cost, 6),
-            "ok": not errors,
-            "error": "; ".join(errors) or None,
-        })
+        if effective_pairs:
+            errors = [rec["error"] for rec in records if rec.get("error")]
+            append_log(work, {
+                "op": "search_adhoc",
+                "subq": args.subq,
+                "queries": [query for _qid, query in effective_pairs],
+                "new_ids": new_ids,
+                "matched_ids": touched,
+                "fetched_id": None,
+                "cost": round(run_cost, 6),
+                "ok": not errors,
+                "error": "; ".join(errors) or None,
+            })
     else:
         for record, change in zip(records, changes):
             append_log(work, {
@@ -896,8 +959,9 @@ def cmd_search(args: argparse.Namespace) -> int:
             work / "evidence" / f"{qid}.md",
             render_evidence(qid, item.get("question", ""), picked) + "\n",
         )
-    ok = len(pairs) - failures
-    print(f"queries: {ok} ok, {failures} failed")
+    ok = len(effective_pairs) - failures
+    skipped_note = f", {len(skipped)} skipped duplicate(s)" if skipped else ""
+    print(f"queries: {ok} ok, {failures} failed{skipped_note}")
     print(f"unique sources: {len(registry['sources'])} ({len(before)} -> {len(registry['sources'])})")
     print("sources per subquestion:")
     for qid in sorted(per_q, key=lambda q: int(q[1:])):
@@ -905,7 +969,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     print(f"run cost: ${run_cost:.4f} (total ${registry['cost_dollars']:.4f})")
     print(f"sources file: {work / 'sources.json'}")
     print(f"evidence dir: {work / 'evidence'}")
-    return 1 if ok == 0 and pairs else 0
+    return 1 if ok == 0 and effective_pairs else 0
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
