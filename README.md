@@ -2,11 +2,11 @@
 
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill that runs ChatGPT/Gemini-style
 deep research end to end: decompose the question, search broadly in parallel, delegate one
-researcher per subquestion, merge the findings into a cited markdown report, render a PDF, and
-send it to you on Telegram.
+researcher per subquestion, merge the findings into a cited markdown report, and send it to you
+on Telegram as a document.
 
-The reasoning lives in a rigid checklist (`SKILL.md`); the deterministic parts live in two
-stdlib-only Python scripts, so a small model can follow the pipeline without improvising.
+The reasoning lives in a rigid checklist (`SKILL.md`); the deterministic parts live in one
+stdlib-only Python script, so a small model can follow the pipeline without improvising.
 
 ## Install
 
@@ -32,9 +32,8 @@ hermes skills update deep-research
 | Requirement | Why |
 |---|---|
 | `DEEP_RESEARCH_EXA_KEY` | search + page fetching (the skill calls Exa's REST API directly) |
-| `terminal` toolset enabled | runs `research.py` / `md_to_pdf.py` |
-| Python 3.10+ | both scripts are stdlib-only |
-| `python3-venv` | first PDF build creates a private venv at `~/.local/share/hermes-deep-research/venv` |
+| `terminal` toolset enabled | runs `research.py` |
+| Python 3.10+ | the script is stdlib-only |
 | `delegate_task` (optional but recommended) | parallel per-subquestion researchers |
 
 Set the key on the machine that runs Hermes:
@@ -73,13 +72,12 @@ and write me a report with sources.
 ```
 
 The agent will confirm the scope, run the pipeline, and reply with a summary plus a
-`MEDIA:` line so the gateway attaches the PDF on Telegram.
+`MEDIA:` line so the gateway attaches the markdown report on Telegram.
 
 Outputs:
 
 ```
 ~/research/<slug>.md              final report, numbered linked citations + References
-~/research/<slug>.pdf             same report as PDF
 ~/research/.work/<slug>/          plan.json, sources.json, evidence/, findings/, draft.md
 ```
 
@@ -98,8 +96,7 @@ which step to continue from.
 5. The agent synthesizes `draft.md` from `templates/report.md`.
 6. `research.py finalize` validates every citation, renumbers them `[1]`, `[2]`, ... in order
    of first appearance, turns them into clickable links, and appends `## References`.
-7. `md_to_pdf.py` renders the PDF.
-8. The reply ends with `MEDIA:/abs/path/<slug>.pdf`.
+7. The reply ends with `MEDIA:/abs/path/<slug>.md`.
 
 Manual commands (same as the skill uses):
 
@@ -111,7 +108,6 @@ python3 skills/deep-research/scripts/research.py search --work DIR --subq q3 --q
 python3 skills/deep-research/scripts/research.py fetch --work DIR --id S12
 python3 skills/deep-research/scripts/research.py finalize --work DIR --draft DIR/draft.md --out ~/research/slug.md
 python3 skills/deep-research/scripts/research.py status --work DIR
-python3 skills/deep-research/scripts/md_to_pdf.py ~/research/slug.md
 ```
 
 `search` and `fetch` exit non-zero with a clear message on failure; a single failed query is
@@ -134,10 +130,8 @@ citation coverage.
 | `HTTP 429` after retries | Exa rate limit; lower `--workers` (default 8) or retry later |
 | `plan.json is invalid` | the error lists exact fields; validate with `search --dry-run` |
 | `unknown source ids` from `finalize` | the draft cites an id that is not in `sources.json`; remove the claim or search for real evidence — never invent ids |
-| PDF fails with a venv/ensurepip error | install `python3-venv` with your system package manager, then re-run; pandoc is used as a fallback if present |
-| PDF exists but the reply has no attachment | the final reply must end with exactly `MEDIA:/absolute/path.pdf` |
 | Research stops mid-run | ask "continue the research"; the agent runs `status` and resumes from the work dir |
-| Hub install misses a file | `SKILL.md` must literally reference every bundled path; all three are referenced |
+| Hub install misses a file | `SKILL.md` must literally reference every bundled path; both are referenced |
 
 ## Development
 
@@ -164,7 +158,6 @@ Layout:
 ```
 skills/deep-research/SKILL.md              agent-facing checklist
 skills/deep-research/scripts/research.py   init/search/fetch/finalize/status
-skills/deep-research/scripts/md_to_pdf.py  markdown -> PDF (venv bootstrap, pandoc fallback)
 skills/deep-research/templates/report.md   report skeleton
 tests/                                     offline pytest suite (mock HTTP, subprocess concurrency)
 ```

@@ -16,7 +16,7 @@ All state lives in a work dir (default: ~/research/.work/<slug>/):
     evidence/<qid>.md         per-subquestion digest for subagents
     findings/<qid>.json       written by subagents (or by the agent)
     draft.md                  written by the agent
-    final.json                written by finalize (final md + pdf paths)
+    final.json                written by finalize (final md path and citation map)
 
 Only the Python standard library is used. Python >= 3.10.
 
@@ -1339,9 +1339,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         except json.JSONDecodeError:
             final_info = {}
     final_md = Path(final_info.get("out") or research_dir() / f"{slug}.md")
-    pdf = final_md.with_suffix(".pdf")
     print(f"final:     [{'x' if final_md.exists() else ' '}] {final_md}")
-    print(f"pdf:       [{'x' if pdf.exists() else ' '}] {pdf}")
 
     if not plan_path.exists():
         print("next: write plan.json (SKILL.md step 2), then run search")
@@ -1353,9 +1351,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     elif not draft.exists():
         print("next: write draft.md from templates/report.md")
     elif not final_md.exists():
-        print("next: run finalize, then md_to_pdf.py")
-    elif not pdf.exists():
-        print("next: run md_to_pdf.py")
+        print("next: run finalize")
     else:
         print("next: deliver the summary + MEDIA line")
     return 0

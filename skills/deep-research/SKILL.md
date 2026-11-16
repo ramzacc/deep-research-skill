@@ -3,7 +3,7 @@ name: deep-research
 description: >
   Runs end-to-end deep research on a question: decompose it into subquestions, search
   many sources in parallel, dig deeper per subquestion, then merge everything into a
-  cited markdown report, convert it to PDF, and deliver it on Telegram. Use when the
+  cited markdown report and deliver it on Telegram. Use when the
   user says "deep research", "research X thoroughly", "write a report on X",
   "investigate X", "do a literature/competitive review", or asks for a well-sourced,
   multi-source analysis rather than a quick answer.
@@ -17,7 +17,7 @@ required_environment_variables:
     required_for: web search and page fetching
 metadata:
   hermes:
-    tags: [research, report, citations, web, pdf, telegram]
+    tags: [research, report, citations, web, telegram]
     category: research
     requires_toolsets: [terminal]
 ---
@@ -25,12 +25,11 @@ metadata:
 # Deep research
 
 You produce a cited report that a careful analyst would accept. Work is done in a fixed
-work dir by `${HERMES_SKILL_DIR}/scripts/research.py` and `${HERMES_SKILL_DIR}/scripts/md_to_pdf.py`,
-and by delegated researchers.
+work dir by `${HERMES_SKILL_DIR}/scripts/research.py`, and by delegated researchers.
 
 **Outputs**
-- `~/research/<slug>.md` — final report with numbered, linked citations and References.
-- `~/research/<slug>.pdf` — same report as PDF, sent to the user via a `MEDIA:` line.
+- `~/research/<slug>.md` — final report with numbered, linked citations and References,
+  delivered to the user as a document via a `MEDIA:` line.
 - `~/research/.work/<slug>/` — plan, sources, evidence, findings, draft (resume state).
 
 **Hard rules (never break)**
@@ -330,16 +329,7 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
   paragraphs (the report is still written; do not ignore this).
 
-## Step 7 — PDF
-
-```
-python3 ${HERMES_SKILL_DIR}/scripts/md_to_pdf.py ~/research/<SLUG>.md
-```
-
-Success prints `pdf: /abs/path` and a size. Confirm the path with the file read tool if in
-doubt. On the first run it installs a private venv (~1 minute); later runs are fast.
-
-## Step 8 — Deliver
+## Step 7 — Deliver
 
 Final reply, nothing else after the MEDIA line:
 
@@ -351,13 +341,14 @@ Key findings:
 - <finding>
 - <finding>
 
-Report: ~/research/<SLUG>.md (PDF attached)
-MEDIA:/absolute/path/to/<SLUG>.pdf
+Report: ~/research/<SLUG>.md (attached)
+MEDIA:/absolute/path/to/<SLUG>.md
 ```
 
-The gateway attaches the PDF on Telegram because of the `MEDIA:` line; use the absolute
-path printed by step 7, one line, no backticks and no other text after it. If the channel
-cannot take files, say so and give the report path instead.
+The gateway attaches the Markdown report as a document on Telegram because of the `MEDIA:` line.
+Use an absolute path: run `realpath ~/research/<SLUG>.md` and put that path on the `MEDIA:` line,
+one line, no backticks and no other text after it. If the channel cannot take files, say so and
+give the report path instead.
 
 ---
 
@@ -387,9 +378,6 @@ completed work; re-running `search` is safe (ids are stable), and `finalize` is 
 - `findings shape` warnings from `status` → add `verified` to every finding, `date_status`
   on date claims, and real S-ids; rewrite that file.
 - Empty results → broaden wording, remove quotes/jargon, add a site: or year variant.
-- PDF: `python3-venv`/pip error → relay the script's suggested fix (install venv support
-  with the system package manager). The markdown report is still valid; deliver it and say
-  the PDF failed.
 - `delegate_task` error or no results message → do the subquestions yourself sequentially
   (step 4 fallback), then continue.
 

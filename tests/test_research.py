@@ -806,16 +806,3 @@ def test_invalid_slug_rejected(tmp_path, capsys):
     code, _out, err = run_cli(["init", "--slug", "Bad Slug!"], capsys)
     assert code == 2
     assert "invalid slug" in err
-
-
-def test_md_to_pdf_reexec_uses_in_venv_flag(tmp_path, monkeypatch):
-    import md_to_pdf
-
-    markdown = tmp_path / "report.md"
-    markdown.write_text("# Report\n\nBody.\n", encoding="utf-8")
-    calls: list[tuple[str, list[str]]] = []
-    monkeypatch.setattr(md_to_pdf, "venv_ready", lambda: True)
-    monkeypatch.setattr(md_to_pdf.os, "execv", lambda path, argv: calls.append((path, argv)))
-    code = md_to_pdf.main([str(markdown)])
-    assert code == 1  # os.execv was stubbed and returned
-    assert calls and calls[0][1][2] == md_to_pdf.IN_VENV_FLAG
