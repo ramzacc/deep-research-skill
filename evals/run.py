@@ -56,15 +56,22 @@ PRICE_INPUT = 0.15
 PRICE_OUTPUT = 0.60
 PRICE_CACHED = 0.003
 
-SECRET_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY")
-REQUIRED_KEYS = SECRET_KEYS + ("OPENCODE_GO_BASE_URL",)
+SECRET_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY", "SERPER_API_KEY", "DEEPSEEK_API_KEY")
+REQUIRED_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL")
 RUN_EXA_KEY_VAR = "DEEP_RESEARCH_EXA_KEY"
 RUN_SERPER_KEY_VAR = "DEEP_RESEARCH_SERPER_KEY"
+RUN_DEEPSEEK_KEY_VAR = "DEEP_RESEARCH_DEEPSEEK_KEY"
+# provider -> (secret name in evals/.env, variable written to the run's HERMES_HOME/.env)
+PROVIDER_KEYS = {
+    "serper": ("SERPER_API_KEY", RUN_SERPER_KEY_VAR),
+    "deepseek": ("DEEPSEEK_API_KEY", RUN_DEEPSEEK_KEY_VAR),
+}
 CONFIG_ENV_KEYS = (
     "DEEP_RESEARCH_EXA_TYPE",
     "DEEP_RESEARCH_SEARCH_PROVIDER",
     "DEEP_RESEARCH_CONTENT_TOP",
     RUN_SERPER_KEY_VAR,
+    RUN_DEEPSEEK_KEY_VAR,
 )
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -307,7 +314,7 @@ def safe_name(text: str) -> str:
 def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Namespace,
             secrets: dict[str, str], variant_skill: Path, version: str, num_results: int,
             max_chars: int, base_url: str, config_env: dict[str, str] | None = None,
-            serper_key: str | None = None) -> dict:
+            provider_env: dict[str, str] | None = None) -> dict:
     rid = run_id(topic["id"], config, rep)
     out = RESULTS_DIR / batch / "runs" / rid
     stats_path = out / "stats.json"
@@ -324,8 +331,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     if hermes_home.exists():
         shutil.rmtree(hermes_home)
     hermes_home.mkdir(parents=True)
-    home_env = {RUN_SERPER_KEY_VAR: serper_key} if serper_key else None
-    write_hermes_home(hermes_home, variant_skill, secrets, num_results, base_url, home_env)
+    write_hermes_home(hermes_home, variant_skill, secrets, num_results, base_url, provider_env)
 
     env = os.environ.copy()
     env.update({
@@ -887,7 +893,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deep-research eval matrix in isolated Hermes homes.")
     parser.add_argument("--batch", required=True, help="result batch name")
     parser.add_argument("--topics", default="", help="comma-separated topic ids (default: all)")
-    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs (A-H)")
+    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs (A-J)")
     parser.add_argument("--reps", type=int, default=1, help="repetitions per topic x config")
     parser.add_argument("--parallel", type=int, default=3, help="parallel Hermes runs")
     parser.add_argument("--timeout-min", type=int, default=40, help="per-run wall timeout")
@@ -927,12 +933,19 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"unknown config(s): {', '.join(unknown)}")
     built = variants.build_all(VARIANTS_DIR)
     config_env = {config: dict(variants.CONFIGS[config].get("env") or {}) for config in configs}
+    config_provider_env: dict[str, dict[str, str] | None] = {}
     for config, env_values in config_env.items():
-        if env_values.get("DEEP_RESEARCH_SEARCH_PROVIDER") == "serper" and not secrets.get("SERPER_API_KEY"):
+        entry = PROVIDER_KEYS.get(env_values.get("DEEP_RESEARCH_SEARCH_PROVIDER"))
+        if entry is None:
+            config_provider_env[config] = None
+            continue
+        secret_name, run_var = entry
+        if not secrets.get(secret_name):
             raise SystemExit(
-                f"config {config} uses the Serper provider; set SERPER_API_KEY in "
-                f"{ENV_FILE.relative_to(ROOT)} (mode 600, gitignored)"
+                f"config {config} uses the {env_values['DEEP_RESEARCH_SEARCH_PROVIDER']} provider; "
+                f"set {secret_name} in {ENV_FILE.relative_to(ROOT)} (mode 600, gitignored)"
             )
+        config_provider_env[config] = {run_var: secrets[secret_name]}
     version = hermes_version()
     base_url = secrets["OPENCODE_GO_BASE_URL"]
     print(f"hermes: {version}")
@@ -964,13 +977,11 @@ def main(argv: list[str] | None = None) -> int:
                         pending.clear()
                         break
                 topic, config, rep = pending.pop(0)
-                serper_key = (secrets.get("SERPER_API_KEY")
-                              if config_env[config].get("DEEP_RESEARCH_SEARCH_PROVIDER") == "serper" else None)
                 future = pool.submit(
                     run_one, args.batch, topic, config, rep, args, secrets, built[config],
                     version, variants.CONFIGS[config]["num_results"],
                     variants.CONFIGS[config].get("max_chars", 6000), base_url,
-                    config_env[config], serper_key,
+                    config_env[config], config_provider_env[config],
                 )
                 active[future] = (topic, config, rep)
             if not active:

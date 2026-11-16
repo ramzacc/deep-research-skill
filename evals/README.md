@@ -25,7 +25,8 @@ git clone --depth 1 https://github.com/NousResearch/hermes-agent evals/.run/herm
 UV_PROJECT_ENVIRONMENT=$PWD/evals/.run/hermes-venv \
   uv sync --project evals/.run/hermes-src --no-dev
 # evals/.env: EXA_API_KEY, OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL,
-#             SERPER_API_KEY (only needed for config H)
+#             SERPER_API_KEY (only needed for config H),
+#             DEEPSEEK_API_KEY (only needed for config J)
 chmod 600 evals/.env
 ```
 
@@ -77,6 +78,7 @@ rest run. `score.py` joins the ranking with the stats and writes `SUMMARY.md`
 | F | 4-8 as shipped (target 6) | 10 | 6000 | 2 search / 2-6 fetch; exactly 3 queries/subq | yes |
 | G | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
 | H | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
+| J | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
 
 `evals/variants.py` copies `skills/deep-research/` and patches `SKILL.md` with
 anchored exact-string replacements; a missing anchor fails the build loudly.
@@ -92,3 +94,8 @@ Configs may also carry an `env` dict that `run.py` applies to the run:
   `run.py` copies `SERPER_API_KEY` from `evals/.env` into that run's
   `HERMES_HOME/.env` as `DEEP_RESEARCH_SERPER_KEY` (mode 600) and refuses to start
   H when the key is absent.
+- **J** sets `DEEP_RESEARCH_SEARCH_PROVIDER=deepseek`, and its variant `SKILL.md`
+  additionally declares `DEEP_RESEARCH_DEEPSEEK_KEY`. `run.py` copies
+  `DEEPSEEK_API_KEY` from `evals/.env` into that run's `HERMES_HOME/.env` as
+  `DEEP_RESEARCH_DEEPSEEK_KEY` (mode 600) and refuses to start J when the key is
+  absent. DeepSeek search and fetch cost $0.00075 per successful request.

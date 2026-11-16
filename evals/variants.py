@@ -14,6 +14,9 @@ D  same breadth as B, but Step 4 replaces delegation with sequential self-resear
 E  budget: B breadth, 5 results/query, 2000 chars/source, 2 search + 2 fetch follow-ups
 F  cost-lean: B breadth, 10 results/query, exactly 3 queries/subquestion,
    2 search + 2-6 fetch follow-ups
+G  B with the cheaper Exa `/search` type=lite
+H  B with Serper search and Exa text for the top 5 new results per query
+J  B with DeepSeek Search & Fetch ($0.00075 per successful request)
 
 `num_results` is applied at run time through `DEEP_RESEARCH_NUM_RESULTS`; the
 SKILL.md budget line is patched too so the model is never told a different
@@ -51,7 +54,7 @@ FOLLOWUP_BUDGET_ANCHOR = (
     "  least 2, at most 4 pages."
 )
 QUERIES_RULE_ANCHOR = "- 3-5 queries per subquestion."
-SERPER_DECLARATION_ANCHOR = (
+EXA_DECLARATION_ANCHOR = (
     "required_environment_variables:\n"
     "  - name: DEEP_RESEARCH_EXA_KEY\n"
     "    prompt: Exa API key for search and page fetching\n"
@@ -167,6 +170,14 @@ CONFIGS: dict[str, dict] = {
         },
         "declare_serper_key": True,
     },
+    "J": {
+        "description": "DeepSeek: B breadth, 8 results/query, DeepSeek Search & Fetch at $0.00075/request",
+        "subquestions": {"min": 4, "max": 8, "target": 6},
+        "num_results": 8,
+        "delegate": True,
+        "env": {"DEEP_RESEARCH_SEARCH_PROVIDER": "deepseek"},
+        "declare_deepseek_key": True,
+    },
 }
 
 
@@ -253,13 +264,25 @@ def patched_skill_md(config: str) -> str:
     if spec.get("declare_serper_key"):
         text = replace_exact(
             text,
-            SERPER_DECLARATION_ANCHOR,
-            SERPER_DECLARATION_ANCHOR
+            EXA_DECLARATION_ANCHOR,
+            EXA_DECLARATION_ANCHOR
             + "  - name: DEEP_RESEARCH_SERPER_KEY\n"
               "    prompt: Serper API key for search\n"
               "    help: Set it with `hermes config set DEEP_RESEARCH_SERPER_KEY <key>`.\n"
               "    required_for: web search\n",
             f"{config} serper key declaration",
+        )
+
+    if spec.get("declare_deepseek_key"):
+        text = replace_exact(
+            text,
+            EXA_DECLARATION_ANCHOR,
+            EXA_DECLARATION_ANCHOR
+            + "  - name: DEEP_RESEARCH_DEEPSEEK_KEY\n"
+              "    prompt: DeepSeek API key for search and page fetching\n"
+              "    help: Set it with `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`.\n"
+              "    required_for: web search and page fetching\n",
+            f"{config} deepseek key declaration",
         )
 
     if not spec["delegate"]:
