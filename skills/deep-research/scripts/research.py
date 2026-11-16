@@ -1122,13 +1122,19 @@ def _dates_in_line(line: str) -> list[tuple["date", int, int]]:
     return found
 
 
+CLOSED_RE = re.compile(
+    r"\b(cerr[óo]|cerrad[oa]s?|venci[óo]|vencid[oa]s?|ya pas[óo]|closed|expired|has passed|was due)\b",
+    re.IGNORECASE,
+)
+
+
 def _date_warnings(text: str) -> list[str]:
     from datetime import datetime as _datetime
     today = _datetime.now().date()
     warnings = []
     for lineno, line in enumerate(text.splitlines(), 1):
         keywords = list(DEADLINE_RE.finditer(line))
-        if not keywords:
+        if not keywords or CLOSED_RE.search(line):
             continue
         dates = _dates_in_line(line)
         for value, start, _end in dates:
@@ -1138,6 +1144,80 @@ def _date_warnings(text: str) -> list[str]:
                     f"({value.isoformat()}): {line.strip()[:180]}"
                 )
                 break
+    return warnings
+
+
+NUMBER_RE = re.compile(r"\d[\d.,]*\d|\d")
+COMPUTED_RE = re.compile(r"≈|c[áa]lculo|calculat|estimad|estimat|supuesto|assum", re.IGNORECASE)
+SUPPORT_SKIP_SECTIONS = ("supuestos", "assumptions", "metodologia", "methodology")
+SUPPORT_WARN_LIMIT = 25
+
+
+def _number_keys(text: str) -> set[str]:
+    """Digit-only keys for numbers with >= 3 significant digits (5.699, 5,699 and 5699 match)."""
+    keys = set()
+    for match in NUMBER_RE.finditer(text):
+        key = re.sub(r"[.,]", "", match.group(0)).lstrip("0")
+        if len(key) >= 3:
+            keys.add(key)
+    return keys
+
+
+def _citation_units(text: str):
+    """Yield (lineno, unit_text, cited_ids) for each sentence or table cell that cites sources."""
+    section = ""
+    for lineno, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            section = _normalize_heading(stripped.lstrip("#"))
+            continue
+        if any(section.startswith(name) for name in SUPPORT_SKIP_SECTIONS):
+            continue
+        if stripped.startswith("|"):
+            units = [cell for cell in stripped.strip("|").split("|")]
+        else:
+            units = re.split(r"(?<=[.!?])\s+", stripped)
+        for unit in units:
+            ids = []
+            for match in CITE_RE.finditer(unit):
+                ids.extend(part.strip() for part in match.group(1).split(","))
+            if ids:
+                yield lineno, unit, ids
+
+
+def _citation_support_warnings(text: str, by_id: dict) -> list[str]:
+    """Numbers in a cited sentence/cell must appear in at least one of its cited sources."""
+    cache: dict[str, set[str]] = {}
+
+    def source_keys(sid: str) -> set[str]:
+        if sid not in cache:
+            src = by_id.get(sid) or {}
+            blob = " ".join([str(src.get("title") or ""), str(src.get("text") or "")]
+                            + [str(h) for h in (src.get("highlights") or [])])
+            cache[sid] = _number_keys(blob)
+        return cache[sid]
+
+    problems = []
+    for lineno, unit, ids in _citation_units(text):
+        if COMPUTED_RE.search(unit):
+            continue
+        claim = CITE_RE.sub(" ", unit)
+        supported = set().union(*(source_keys(sid) for sid in ids if sid in by_id))
+        missing = sorted(_number_keys(claim) - supported)
+        if missing:
+            problems.append((lineno, missing, ids, claim.strip()))
+    if not problems:
+        return []
+    warnings = [
+        f"warning: {len(problems)} cited sentence(s)/cell(s) contain numbers not found in the "
+        "sources they cite (wrong citation, stale/misread value, or an unmarked calculation):"
+    ]
+    for lineno, missing, ids, claim in problems[:SUPPORT_WARN_LIMIT]:
+        warnings.append(
+            f"  line {lineno}: {', '.join(missing)} not in {', '.join(ids)}: {claim[:140]}"
+        )
+    if len(problems) > SUPPORT_WARN_LIMIT:
+        warnings.append(f"  ... and {len(problems) - SUPPORT_WARN_LIMIT} more")
     return warnings
 
 
@@ -1251,6 +1331,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             "4,000-7,000 words; warning above 9,000)"
         )
     warnings.extend(_date_warnings(text))
+    warnings.extend(_citation_support_warnings(text, by_id))
     for warning in warnings:
         note(warning)
 

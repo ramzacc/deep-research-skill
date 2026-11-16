@@ -905,3 +905,42 @@ def test_invalid_slug_rejected(tmp_path, capsys):
     code, _out, err = run_cli(["init", "--slug", "Bad Slug!"], capsys)
     assert code == 2
     assert "invalid slug" in err
+
+
+def test_citation_support_flags_numbers_missing_from_cited_source():
+    by_id = {
+        "S1": {"id": "S1", "title": "Tarifas", "text": "La tarifa es 0,7202 soles por kWh y la tarjeta cuesta S/ 5.699."},
+        "S2": {"id": "S2", "title": "Otra", "text": "Nada relevante aquí, 2019."},
+    }
+    text = "\n".join([
+        "## Resumen",
+        "La tarjeta cuesta S/ 5699 en Lima [S1]. La tarifa es 72.02 ctm por kWh [S1].",
+        "El paquete paga 46.236 al año [S2].",
+        "| Opción | Precio |",
+        "| Local | S/ 5,699 [S1] |",
+        "| Import | US$ 1.982 [S1] |",
+        "Costo mensual estimado de 1.250 soles [S1].",
+        "## Supuestos",
+        "| Horas | 2.920 [S2] |",
+    ])
+    warnings = research._citation_support_warnings(text, by_id)
+    joined = "\n".join(warnings)
+    assert "46236 not in S2" in joined
+    assert "1982 not in S1" in joined
+    assert "5699" not in joined and "7202" not in joined   # format variants still match
+    assert "1250" not in joined                             # marked as an estimate
+    assert "2920" not in joined                             # Supuestos section is skipped
+    assert warnings[0].startswith("warning: 2 cited")
+
+
+def test_citation_support_silent_when_supported():
+    by_id = {"S1": {"id": "S1", "title": "t", "text": "Deadline 03/12/2026, fee R$ 241,22."}}
+    text = "## Qué hacer\nPostula antes del 03/12/2026 y paga R$ 241,22 [S1]."
+    assert research._citation_support_warnings(text, by_id) == []
+
+
+def test_date_lint_ignores_lines_that_say_closed():
+    past = "El plazo de inscripción cerró el 10/11/2020 [S1]."
+    still_open = "Plazo de inscripción: 10/11/2020 [S1]."
+    assert research._date_warnings(past) == []
+    assert research._date_warnings(still_open)
