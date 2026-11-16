@@ -320,6 +320,21 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    the cells) and keep the prose around it to 1-3 sentences that say what the table means.
    Do not pad: a typical report is 4,000-7,000 words. Do not leave HTML comments in the body. Do
    not add a References heading — `finalize` adds the localized one.
+6. Before finalizing, re-read the whole draft once and fix these four things:
+   - **Cite the right source.** A number or proper name next to `[S#]` must appear in S#'s
+     text. If it came from another source, cite that one; if you cannot find it, move it to
+     Not verified.
+   - **Mark your own calculations.** Any number you computed (conversions, totals, monthly
+     costs, break-even) gets `≈` in front of it and cites the inputs, e.g. `≈ US$ 1,309 (cálculo:
+     S/ 4,500 ÷ 3.438) [S2][S7]`. Recompute every computed row from the Assumptions table; one
+     exchange rate everywhere.
+   - **One fact, one value.** If the same fact appears with two values (a fee, a requirement,
+     an eligibility rule), keep the best-sourced one everywhere, or explain the conflict in
+     Disagreements.
+   - **Act on current facts only.** Every time-sensitive fact used in What to do (a person's
+     current affiliation, a price, a deadline, a requirement, availability) must come from a
+     page you fetched in this run and that shows it is current. If not, fetch the current page
+     (`fetch` costs almost nothing) or drop the step.
 
 ## Step 6 — Finalize
 
@@ -343,6 +358,11 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
 - `warning: report is ... words` → cut padding; a typical report is 4,000-7,000 words.
 - `warning: line ... mentions a deadline date in the past` → do not present it as actionable;
   mark it `date_status: "past"`, and give the next cycle only if a source shows one.
+- `warning: N cited sentence(s)/cell(s) contain numbers not found in the sources they cite`
+  → for each listed line, starting with Summary and What to do: if it is your calculation,
+  mark it with `≈` and cite its inputs; if it is a fact, find the source that contains it and
+  cite that one, or fetch the cited page to check the current value; if no source has it,
+  move it to Not verified. Re-run finalize once; a few remaining warnings are acceptable.
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
   paragraphs (the report is still written; do not ignore this).
 
