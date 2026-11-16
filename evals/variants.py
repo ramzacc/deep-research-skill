@@ -12,6 +12,8 @@ B  4-8 subquestions as shipped, 8 results per query, delegated (current default)
 C  8 subquestions exactly, 10 results per query, delegated
 D  same breadth as B, but Step 4 replaces delegation with sequential self-research
 E  budget: B breadth, 5 results/query, 2000 chars/source, 2 search + 2 fetch follow-ups
+F  cost-lean: B breadth, 10 results/query, exactly 3 queries/subquestion,
+   2 search + 2-6 fetch follow-ups
 
 `num_results` is applied at run time through `DEEP_RESEARCH_NUM_RESULTS`; the
 SKILL.md budget line is patched too so the model is never told a different
@@ -48,6 +50,7 @@ FOLLOWUP_BUDGET_ANCHOR = (
     "- Per subquestion researcher: max 4 follow-up search calls (≤3 queries each) and fetch at\n"
     "  least 2, at most 4 pages."
 )
+QUERIES_RULE_ANCHOR = "- 3-5 queries per subquestion."
 STEP4_START = "## Step 4 — Depth (delegated researchers)"
 STEP5_START = "## Step 5 — Synthesize"
 
@@ -67,11 +70,15 @@ For each subquestion `<QID>` in plan.json, in order q1, q2, ...:
    `python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12 --max-chars 20000`
    For every price, deadline, eligibility rule or other decision-critical number, fetch its
    source and confirm the value in the full text. Use the fetched full text, not the excerpt.
+   If an official page URL that would answer the question already appears in the evidence,
+   fetch it instead of searching again.
 3. Answer the subquestion using ONLY facts present in the evidence file or in pages you
    fetched. Cite with S-ids that appear in those outputs. If sources conflict, record the
    conflict instead of picking a side silently. If evidence is missing, say so in gaps.
    For every date, set date_status relative to today: "open", "past" or "unknown". Never
    present a past deadline as actionable; give the next cycle if the sources show one.
+   Proper names: include a person/group/lab/program/scholarship/product only if it appears
+   literally in the evidence file or a fetched page. Otherwise omit it or put it in gaps.
 4. Write valid JSON to `<WORK>/findings/<QID>.json` using the file write tool:
    {"id": "<QID>",
     "question": "<QUESTION>",
@@ -126,6 +133,15 @@ CONFIGS: dict[str, dict] = {
         "followups": {"searches": 2, "fetches": 2},
         "delegate": True,
     },
+    "F": {
+        "description": "cost-lean: 4-8 subquestions (target 6), 10 results/query, "
+                       "exactly 3 queries/subquestion, 2 search + 2-6 fetch follow-ups",
+        "subquestions": {"min": 4, "max": 8, "target": 6},
+        "num_results": 10,
+        "queries_per_subq": {"exact": 3},
+        "followups": {"searches": 2, "fetches": 6},
+        "delegate": True,
+    },
 }
 
 
@@ -167,10 +183,22 @@ def patched_skill_md(config: str) -> str:
     else:
         budget_subq = f"{subq['min']}-{subq['max']} subquestions"
 
+    queries_rule = spec.get("queries_per_subq")
+    exact_queries = None
+    if queries_rule and "exact" in queries_rule:
+        exact_queries = int(queries_rule["exact"])
+        text = replace_exact(
+            text,
+            QUERIES_RULE_ANCHOR,
+            f"- Exactly {exact_queries} queries per subquestion.",
+            f"{config} query count",
+        )
+    budget_queries = f"{exact_queries} queries" if exact_queries else "3-5 queries"
+
     text = replace_exact(
         text,
         BUDGET_ANCHOR,
-        f"- {budget_subq}, 3-5 queries each, {spec['num_results']} results per query, "
+        f"- {budget_subq}, {budget_queries} each, {spec['num_results']} results per query, "
         f"{spec.get('max_chars', 6000)} chars per source.",
         f"{config} budget line",
     )

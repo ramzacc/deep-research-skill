@@ -38,7 +38,7 @@ the real `required_environment_variables` passthrough. No `python3` shim and no
 ```bash
 python3 evals/variants.py --check
 python3 evals/run.py --batch smoke --topics smoke --configs B --reps 1
-python3 evals/run.py --batch full --configs A,B,C,D,E --reps 2 --parallel 3 --max-exa-usd 20
+python3 evals/run.py --batch full --configs A,B,C,D,E,F --reps 2 --parallel 3 --max-exa-usd 20
 ```
 
 Each run gets its own `HOME` and `HERMES_HOME`, the variant skill, a 40-minute
@@ -73,6 +73,7 @@ rest run. `score.py` joins the ranking with the stats and writes `SUMMARY.md`
 | C | exactly 8 | 10 | 6000 | 4 search / 2-4 fetch | yes |
 | D | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | no, sequential self-research |
 | E | 4-8 as shipped (target 6) | 5 | 2000 | 2 search / 2 fetch | yes |
+| F | 4-8 as shipped (target 6) | 10 | 6000 | 2 search / 2-6 fetch; exactly 3 queries/subq | yes |
 
 `evals/variants.py` copies `skills/deep-research/` and patches `SKILL.md` with
 anchored exact-string replacements; a missing anchor fails the build loudly.

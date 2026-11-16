@@ -873,7 +873,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deep-research eval matrix in isolated Hermes homes.")
     parser.add_argument("--batch", required=True, help="result batch name")
     parser.add_argument("--topics", default="", help="comma-separated topic ids (default: all)")
-    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs")
+    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs (A-F)")
     parser.add_argument("--reps", type=int, default=1, help="repetitions per topic x config")
     parser.add_argument("--parallel", type=int, default=3, help="parallel Hermes runs")
     parser.add_argument("--timeout-min", type=int, default=40, help="per-run wall timeout")
