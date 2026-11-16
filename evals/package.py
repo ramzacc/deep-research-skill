@@ -6,7 +6,7 @@ appends labels for new runs, and only appends rows/sections to an existing
 `RANKING.md`. A ranking the user has started filling is never overwritten.
 
 For each topic, `status: ok` runs are shuffled with a recorded seed and copied
-to `evals/results/<batch>/blind/<topic>/R01.md|pdf`. The mapping lives in
+to `evals/results/<batch>/blind/<topic>/R01.md`. The mapping lives in
 `blind/key.json`. No stats are copied into the blind folder.
 """
 
@@ -176,8 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         md_path = run["dir"] / stats["report_md"]
         if not md_path.is_file():
             continue
-        usable.append({**run, "md": md_path,
-                       "pdf": (run["dir"] / stats["report_pdf"]) if stats.get("report_pdf") else None})
+        usable.append({**run, "md": md_path})
     if not usable:
         raise SystemExit(f"no status=ok runs with a report in batch {args.batch!r}")
 
@@ -233,8 +232,6 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 labels.append(label)
             shutil.copy2(run["md"], topic_dir / f"{label}.md")
-            if run["pdf"] and run["pdf"].is_file():
-                shutil.copy2(run["pdf"], topic_dir / f"{label}.pdf")
         key["topics"][topic] = existing
         ordered_labels = sorted(existing, key=lambda label: int(LABEL_RE.match(label).group(1)) if LABEL_RE.match(label) else 0)
         lines = add_missing_rows(lines, topic, ordered_labels)

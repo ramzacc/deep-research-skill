@@ -4,7 +4,8 @@
 Matrix: topics x skill configs x repetitions. Each run gets its own HOME and
 HERMES_HOME, a variant of the skill, an Exa key and the OpenCode Go endpoint.
 Stats are collected from the work dir, `log.jsonl`, `final.json`, the
-stdout/stderr transcript and Hermes' per-home `state.db` usage ledger.
+stdout/stderr transcript and Hermes' per-home `state.db` usage ledger. The
+deliverable is the markdown report.
 
 Secrets come from `evals/.env` (gitignored, chmod 600) and are only written to
 `<run>/hermes-home/.env` (chmod 600). They are never printed or copied into
@@ -44,7 +45,6 @@ TOPICS_LOCAL = EVAL_DIR / "topics.local.json"
 VARIANTS_DIR = RUN_DIR / "skills"
 HERMES_VENV = RUN_DIR / "hermes-venv"
 HERMES_BIN = HERMES_VENV / "bin" / "hermes"
-PDF_VENV = RUN_DIR / "pdf-venv"
 
 MODEL = "deepseek-v4.1-flash"
 PROVIDER = "opencode-go"
@@ -167,26 +167,6 @@ def ensure_hermes() -> None:
             "Install the isolated copy first (main branch, Python 3.14, locked deps):\n"
             f"  ls {RUN_DIR / 'hermes-src'} || git clone --depth 1 https://github.com/NousResearch/hermes-agent {RUN_DIR / 'hermes-src'}\n"
             f"  UV_PROJECT_ENVIRONMENT=$PWD/{HERMES_VENV.relative_to(ROOT)} uv sync --project {RUN_DIR / 'hermes-src'} --no-dev"
-        )
-
-
-def ensure_pdf_venv() -> None:
-    """One shared PDF venv, so parallel runs do not each pip-install markdown-pdf."""
-    python = PDF_VENV / "bin" / "python"
-    lock_path = PDF_VENV.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        if python.is_file():
-            probe = subprocess.run([str(python), "-c", "import markdown_pdf"], capture_output=True)
-            if probe.returncode == 0:
-                return
-        if PDF_VENV.exists():
-            shutil.rmtree(PDF_VENV)
-        subprocess.run([sys.executable, "-m", "venv", str(PDF_VENV)], check=True)
-        subprocess.run(
-            [str(python), "-m", "pip", "install", "-q", "markdown-pdf==1.13.3", "PyMuPDF==2.1"],
-            check=True,
         )
 
 
@@ -341,7 +321,6 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     env.update({
         "HOME": str(child_home),
         "HERMES_HOME": str(hermes_home),
-        "HERMES_DEEP_RESEARCH_VENV": str(PDF_VENV),
         "DEEP_RESEARCH_NUM_RESULTS": str(num_results),
         "DEEP_RESEARCH_MAX_CHARS": str(max_chars),
     })
@@ -669,7 +648,7 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
                         seen.append(sid)
             citation_map = {sid: index for index, sid in enumerate(seen, 1)}
 
-    # find the final report and PDF, copy into <run>/report/
+    # find the final report, copy into <run>/report/
     report_md_original: Path | None = None
     if final_info.get("out"):
         report_md_original = Path(final_info["out"]).expanduser()
@@ -680,16 +659,11 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
     report_dir = out / "report"
     report_dir.mkdir(exist_ok=True)
     report_md = None
-    report_pdf = None
     report_text = ""
     if report_md_original is not None and report_md_original.is_file():
         report_md = report_dir / report_md_original.name
         shutil.copy2(report_md_original, report_md)
         report_text = report_md.read_text(encoding="utf-8", errors="replace")
-        pdf_original = report_md_original.with_suffix(".pdf")
-        if pdf_original.is_file():
-            report_pdf = report_dir / pdf_original.name
-            shutil.copy2(pdf_original, report_pdf)
 
     (out / "reply.md").write_text(reply.rstrip() + "\n", encoding="utf-8")
 
@@ -823,9 +797,6 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         "finalize_warnings": final_info.get("warnings") or [],
         "language": detect_language(report_text),
         "report_md": str(report_md.relative_to(out)) if report_md else None,
-        "report_pdf": str(report_pdf.relative_to(out)) if report_pdf else None,
-        "pdf_exists": bool(report_pdf and report_pdf.is_file()),
-        "pdf_bytes": report_pdf.stat().st_size if report_pdf and report_pdf.is_file() else 0,
         "media_line": media,
         "media_line_valid": media_ok,
         "reply_ends_with_question": reply.strip().endswith("?"),
@@ -846,7 +817,6 @@ def render_stats_md(stats: dict) -> str:
         f"- wall: {stats['wall_seconds']} s",
         f"- report: {stats['report_md'] or 'missing'} ({stats['report_words']} words, "
         f"{stats['n_thematic_sections']} thematic sections, language {stats['language']})",
-        f"- pdf: {stats['report_pdf'] or 'missing'} ({stats['pdf_bytes']} bytes)",
         f"- MEDIA line: {stats['media_line'] or 'none'} (valid: {stats['media_line_valid']})",
         "",
         "## Pipeline",
@@ -933,7 +903,6 @@ def main(argv: list[str] | None = None) -> int:
 
     secrets = load_secrets()
     ensure_hermes()
-    ensure_pdf_venv()
     sys.path.insert(0, str(EVAL_DIR))
     import variants  # noqa: E402  (same directory)
 

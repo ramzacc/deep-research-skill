@@ -28,7 +28,6 @@ UV_PROJECT_ENVIRONMENT=$PWD/evals/.run/hermes-venv \
 chmod 600 evals/.env
 ```
 
-The first `run.py` also builds a shared PDF venv at `evals/.run/pdf-venv`.
 Each run writes `DEEP_RESEARCH_EXA_KEY` into its `HERMES_HOME/.env`; the skill
 declares that variable, so Hermes registers it for the terminal sandbox through
 the real `required_environment_variables` passthrough. No `python3` shim and no
