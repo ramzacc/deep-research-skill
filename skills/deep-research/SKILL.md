@@ -111,6 +111,10 @@ Rules:
   current state and timeline; key players/companies/institutions; data and numbers;
   evidence and case studies; criticisms, risks and counter-evidence; recent developments
   (last 12 months); outlook and competing forecasts.
+- If the request is a decision (choose, buy, apply, move, start, compare options to act on),
+  make the LAST subquestion an execution subquestion: "What does acting on the best options
+  require for this user: steps and paperwork, timeline, total cost, main risks and a plan B?"
+  It covers the asks about the decision itself. Skip it for purely informational requests.
 - 3-5 queries per subquestion. Make them diverse: (a) plain question phrasing, (b) an
   alternative vocabulary/synonym phrasing, (c) one with the current year, (d) one aimed at
   primary sources (`report filetype:pdf`, `site:gov`, `site:edu`, `annual report`,
@@ -294,9 +298,12 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
      exchange rate, cited, everywhere; cost totals must list every component.
    - `## Methodology` / `## Metodología`: real counts (subquestions, sources, queries) and today.
 5. Rules for every section: every factual paragraph has at least one `[S#]`; no uncited
-   numbers; put the citation where the claim is, not only at the end. Keep the whole report
-   at or below 4,500 words. Do not leave HTML comments in the body. Do not add a References
-   heading — `finalize` adds the localized one.
+   numbers; put the citation where the claim is, not only at the end. Prefer tables over
+   prose: whenever you compare options, amounts, requirements, deadlines, steps or risks, put
+   them in a markdown table (one row per option, one column per attribute, citations inside
+   the cells) and keep the prose around it to 1-3 sentences that say what the table means.
+   Keep the whole report at or below 4,500 words. Do not leave HTML comments in the body. Do
+   not add a References heading — `finalize` adds the localized one.
 
 ## Step 6 — Finalize
 
