@@ -45,6 +45,9 @@ work dir by `${HERMES_SKILL_DIR}/scripts/research.py`, and by delegated research
    prices, monitoring and risks. Do NOT give step-by-step instructions for compounding,
    manufacturing or sourcing veterinary/unregulated products. Put a risk warning next to
    any mention of them.
+7. A proper name (person, group, lab, program, scholarship, product) may appear in the report
+   only if it appears literally in an evidence excerpt or a fetched page. Otherwise leave it
+   out, or list it under Not verified.
 
 ---
 
@@ -219,13 +222,17 @@ context: |
     python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12 --max-chars 20000
   For every price, deadline, eligibility rule or other decision-critical number, run fetch
   on its source and confirm the value in the full text. Use the fetched full text, not the
-  evidence excerpt. Follow-up searches are concurrency-safe; use the new S-ids they print.
+  evidence excerpt. If an official page URL that would answer the question already appears
+  in the evidence, fetch it instead of searching again. Follow-up searches are concurrency-safe;
+  use the new S-ids they print.
 
   STEP 3 — Answer the subquestion. Use ONLY facts present in the evidence file or in pages
   you fetched. Cite with S-ids that appear in those outputs. If sources conflict, record the
   conflict instead of picking a side silently. If evidence is missing, say so in gaps.
   For every date, set date_status relative to today: "open", "past" or "unknown". Never
   present a past deadline as actionable; if the sources show the next cycle, give it.
+  Proper names: include a person/group/lab/program/scholarship/product only if it appears
+  literally in the evidence file or a fetched page. Otherwise omit it or put it in gaps.
 
   STEP 4 — Write valid JSON to <WORK>/findings/<QID>.json using the file write tool:
   {"id": "<QID>",
@@ -385,7 +392,8 @@ python3 ${HERMES_SKILL_DIR}/scripts/research.py status --work <WORK>
 ```
 
 Read the `[x]`/`[ ]` lines and `next:`, then continue at that step only. Never redo
-completed work; re-running `search` is safe (ids are stable), and `finalize` is repeatable.
+completed work; re-running `search` is safe (ids are stable and already-run queries are
+skipped as duplicates), and `finalize` is repeatable.
 
 ## Failure handling
 
