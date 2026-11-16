@@ -146,8 +146,9 @@ python3 -m pytest -q tests
 Tests are fully offline. The HTTP layer is replaced by a JSON fixture selected with the
 **test-only** environment variables:
 
-- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search` and `/contents`
-  responses (supports status codes, per-route response sequences, and artificial `delay`).
+- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search`, Exa `/contents`
+  and Serper `/search` responses (`endpoint: "serper"`; supports status codes, per-route
+  response sequences, and artificial `delay`).
 - `DEEP_RESEARCH_BACKOFF_BASE=0` — disables retry sleeps in tests.
 
 Production knobs:
@@ -155,6 +156,13 @@ Production knobs:
 - `DEEP_RESEARCH_EXA_KEY` — the Exa key used by the scripts (falls back to `EXA_API_KEY`).
 - `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 8; `--num-results` wins).
 - `DEEP_RESEARCH_MAX_CHARS` — page-text characters per source (default 6000; `--max-chars` wins).
+- `DEEP_RESEARCH_SEARCH_PROVIDER` — `exa` (default) or `serper`. Serper mode searches
+  Google via Serper, stores the snippet as each source's highlight, then fetches page text
+  for the top new results with Exa `/contents`.
+- `DEEP_RESEARCH_SERPER_KEY` — Serper API key; required when the provider is `serper`.
+- `DEEP_RESEARCH_EXA_TYPE` — Exa `/search` type: `auto` (default) or the cheaper `lite`.
+- `DEEP_RESEARCH_CONTENT_TOP` — in Serper mode, page texts fetched per query (default 5;
+  `0` disables content fetching, leaving snippet-only sources).
 
 Layout:
 
