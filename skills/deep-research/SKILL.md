@@ -370,8 +370,9 @@ For every item in `plan.json` `post_actions`, say `done` or `failed — <reason>
 Post-actions block when the list is empty. The gateway attaches the Markdown report as a document
 on Telegram because of the `MEDIA:` line.
 Use an absolute path: run `realpath ~/research/<SLUG>.md` and put that path on the `MEDIA:` line,
-one line, no backticks and no other text after it. If the channel cannot take files, say so and
-give the report path instead.
+one line, no backticks and no other text after it. Always include the MEDIA line, even in a
+terminal/CLI session: the gateway uses it when a file channel exists, and CLI users can open the
+absolute path.
 
 ---
 
