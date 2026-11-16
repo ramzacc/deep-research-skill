@@ -612,6 +612,14 @@ def validate_plan(plan: dict) -> list[dict]:
 
     if not isinstance(plan.get("user_context"), str):
         errors.append("plan.json: user_context must be a string (empty is allowed)")
+    post_actions = plan.get("post_actions", [])
+    if not isinstance(post_actions, list):
+        errors.append("plan.json: post_actions must be a list of strings when present")
+        post_actions = []
+    else:
+        for index, action in enumerate(post_actions):
+            if not isinstance(action, str) or not action.strip():
+                errors.append(f"plan.json: post_actions[{index}] must be a non-empty string")
     identify = plan.get("identify", [])
     if not isinstance(identify, list):
         errors.append("plan.json: identify must be a list of strings when present")
@@ -1287,12 +1295,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     slug = slug_from_work(work)
     plan_path = work / "plan.json"
     subquestions: list[dict] = []
+    post_actions: list[str] = []
     if plan_path.exists():
         try:
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             subquestions = [item for item in plan.get("subquestions") or [] if isinstance(item, dict)]
+            post_actions = [item for item in plan.get("post_actions") or [] if isinstance(item, str) and item.strip()]
             slug = str(plan.get("slug") or slug)
             print(f"plan:      [x] {len(subquestions)} subquestions — {plan.get('topic') or '(no topic)'}")
+            if post_actions:
+                print(f"post_actions: {len(post_actions)}")
+                for action in post_actions:
+                    print(f"  - {action}")
         except json.JSONDecodeError:
             print("plan:      [!] plan.json is not valid JSON")
     else:

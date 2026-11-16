@@ -5,8 +5,9 @@ description: >
   many sources in parallel, dig deeper per subquestion, then merge everything into a
   cited markdown report and deliver it on Telegram. Use when the
   user says "deep research", "research X thoroughly", "write a report on X",
-  "investigate X", "do a literature/competitive review", or asks for a well-sourced,
-  multi-source analysis rather than a quick answer.
+  "investigate X", "do a literature/competitive review", asks in Spanish for
+  "investigación profunda", "investiga a fondo", "hazme un informe/reporte sobre", or
+  "investiga X", or asks for a well-sourced, multi-source analysis rather than a quick answer.
 version: 1.0.0
 author: ramzacc
 platforms: [linux, macos]
@@ -53,6 +54,8 @@ work dir by `${HERMES_SKILL_DIR}/scripts/research.py`, and by delegated research
   comparison set, ask exactly ONE clarifying question and stop. Otherwise proceed.
 - If the request is a quick factual lookup that one search answers, say so and answer it
   directly instead of running this pipeline.
+- If the user asked for a follow-up action with the results (update a task, send a message,
+  write a file), remember its verbatim intent for `post_actions` in plan.json.
 - Otherwise reply with one line: `Starting deep research on "<topic>".` Then continue.
 
 ## Step 1 — Init
@@ -79,6 +82,7 @@ Write `<WORK>/plan.json` with the file write tool (not a shell heredoc). Shape, 
   "asks": ["every explicit request in the user's prompt, one item each"],
   "user_context": "profile/constraints from the prompt plus what Hermes knows about the user; empty string is allowed",
   "identify": ["specific artifact the prompt refers to, if any"],
+  "post_actions": ["follow-up action the user asked for with the results, verbatim intent"],
   "subquestions": [
     {
       "id": "q1",
@@ -98,6 +102,10 @@ Rules:
   report, post or page). Omit it or use `[]` when none. If the prompt says "a guide someone
   wrote on forum X", this is an artifact: the subject is the canonical document, not the forum
   thread that mentions it.
+- `post_actions`: optional list, default `[]`. Record every follow-up action the user asked for
+  with the results, verbatim intent (for example "update my Todoist task Y with the results" or
+  "write the report path to ~/done.txt"). The post-actions step runs them after finalize; they
+  must survive the background-researcher wake, so re-read plan.json (or run `status`) later.
 - If `identify` is non-empty, `q1` MUST be exactly:
   `Identify exactly which <artifact> is meant: its canonical name, current URL and authorship
   history`. Use official/primary queries for q1 and prefer the canonical, maintained document
@@ -260,7 +268,8 @@ to `status`. Otherwise tell the user `N researchers running.` and **END YOUR TUR
 arrive as a new message. Do not poll, do not sleep, do not do the work yourself while waiting.
 
 When results arrive (or when you resume):
-1. `python3 ${HERMES_SKILL_DIR}/scripts/research.py status --work <WORK>`
+1. `python3 ${HERMES_SKILL_DIR}/scripts/research.py status --work <WORK>` (it prints
+   `post_actions`; re-read plan.json so they survive the wake).
 2. Every subquestion listed under `findings:` as missing → research it YOURSELF, one at a
    time: read its evidence file, optionally run up to 4 ad-hoc searches and fetch at least 2
    and at most 4 pages, then write `<WORK>/findings/<qid>.json` in the same shape with the
@@ -329,7 +338,14 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
   paragraphs (the report is still written; do not ignore this).
 
-## Step 7 — Deliver
+## Step 7 — Post-actions
+
+Re-read `<WORK>/plan.json` (or run `status`) and take its `post_actions` list. Run every item
+with your available tools. Example: update the Todoist task: put the Summary bullets and the
+report path in the task description/comment.
+If a tool is missing or fails, do not stop; note it for the final reply.
+
+## Step 8 — Deliver
 
 Final reply, nothing else after the MEDIA line:
 
@@ -341,11 +357,17 @@ Key findings:
 - <finding>
 - <finding>
 
+Post-actions:
+- <action>: done
+- <action>: failed — <reason>
+
 Report: ~/research/<SLUG>.md (attached)
 MEDIA:/absolute/path/to/<SLUG>.md
 ```
 
-The gateway attaches the Markdown report as a document on Telegram because of the `MEDIA:` line.
+For every item in `plan.json` `post_actions`, say `done` or `failed — <reason>`; omit the
+Post-actions block when the list is empty. The gateway attaches the Markdown report as a document
+on Telegram because of the `MEDIA:` line.
 Use an absolute path: run `realpath ~/research/<SLUG>.md` and put that path on the `MEDIA:` line,
 one line, no backticks and no other text after it. If the channel cannot take files, say so and
 give the report path instead.
@@ -380,6 +402,8 @@ completed work; re-running `search` is safe (ids are stable), and `finalize` is 
 - Empty results → broaden wording, remove quotes/jargon, add a site: or year variant.
 - `delegate_task` error or no results message → do the subquestions yourself sequentially
   (step 4 fallback), then continue.
+- A post-action tool is missing or fails → do not stop; report that item as failed in the final
+  reply.
 
 ## Budget defaults
 

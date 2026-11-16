@@ -355,6 +355,27 @@ def test_plan_validation_errors(tmp_path, monkeypatch, capsys, plan, expected):
     assert expected in err
 
 
+def test_plan_post_actions_validation(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    plan = plan_of(("q1", ["a"]))
+    plan["post_actions"] = ["update my Todoist task with the results"]
+    work = make_work(tmp_path, plan)
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 0, err
+
+    plan["post_actions"] = "update my task"
+    (work / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 2
+    assert "post_actions must be a list" in err
+
+    plan["post_actions"] = [""]
+    (work / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    code, _out, err = run_cli(["search", "--work", str(work), "--dry-run"], capsys)
+    assert code == 2
+    assert "post_actions[0]" in err
+
+
 def test_plan_requires_ask_coverage(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
     plan = plan_of(("q1", ["a"]), ("q2", ["b"]))
@@ -741,6 +762,17 @@ def test_validate_finding_shape():
 # --------------------------------------------------------------------------
 # h. status on partial state
 # --------------------------------------------------------------------------
+
+def test_status_prints_post_actions(tmp_path, capsys):
+    plan = plan_of(("q1", ["a"]))
+    plan["post_actions"] = ["update my Todoist task with the results", "write ~/done.txt"]
+    work = make_work(tmp_path, plan)
+    code, out, err = run_cli(["status", "--work", str(work)], capsys)
+    assert code == 0, err
+    assert "post_actions: 2" in out
+    assert "  - update my Todoist task with the results" in out
+    assert "  - write ~/done.txt" in out
+
 
 def test_status_partial_state(tmp_path, capsys):
     work = make_work(tmp_path, plan_of(("q1", ["a"]), ("q2", ["b"])))
