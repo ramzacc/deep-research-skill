@@ -1366,6 +1366,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("next: write draft.md from templates/report.md")
     elif not final_md.exists():
         print("next: run finalize")
+    elif post_actions:
+        print("next: run the plan.json post_actions, then deliver the summary + MEDIA line")
     else:
         print("next: deliver the summary + MEDIA line")
     return 0
