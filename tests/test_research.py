@@ -1604,6 +1604,22 @@ def test_finalize_rejects_bare_source_ids_in_a_table(tmp_path, capsys):
     assert "bare source ids" in events[-1]["error"]
 
 
+def test_finalize_allows_a_single_id_like_token_in_prose(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n"
+        "The Galaxy S1 phone is old [S1].\n\n"
+        "## Resumen\n\n## Implicaciones\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 0, err
+
+
 def test_finalize_ignores_unknown_bare_tokens_and_bracketed_ids(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
