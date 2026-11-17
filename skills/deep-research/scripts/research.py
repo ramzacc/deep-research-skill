@@ -18,7 +18,8 @@ All state lives in a work dir (default: ~/research/.work/<slug>/):
     draft.md                  written by the agent
     final.json                written by finalize (final md path and citation map)
 
-Only the Python standard library is used. Python >= 3.10.
+Only the Python standard library is used. Python >= 3.10. Exa searches use
+type "lite".
 
 Exit codes: 0 ok, 1 operation failed (bad citations, network error), 2 bad
 input (invalid slug/plan/arguments or missing API key).
@@ -44,9 +45,6 @@ from pathlib import Path
 
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 EXA_CONTENTS_URL = "https://api.exa.ai/contents"
-SERPER_SEARCH_URL = "https://google.serper.dev/search"
-SERPER_USD_PER_CREDIT = 0.001
-CONTENTS_BATCH_SIZE = 25
 TEXT_MAX_CHARS = 6000
 HIGHLIGHTS_PER_SOURCE = 8
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
@@ -70,16 +68,6 @@ DEFAULT_NUM_RESULTS = 8
 # Characters of page text per source. DEEP_RESEARCH_MAX_CHARS is the default; --max-chars wins.
 MAX_CHARS_ENV = "DEEP_RESEARCH_MAX_CHARS"
 DEFAULT_MAX_CHARS = TEXT_MAX_CHARS
-# Search backend: "exa" (default) or "serper".
-SEARCH_PROVIDER_ENV = "DEEP_RESEARCH_SEARCH_PROVIDER"
-DEFAULT_SEARCH_PROVIDER = "exa"
-# Exa /search type: "lite" (default, cheaper) or "auto".
-EXA_TYPE_ENV = "DEEP_RESEARCH_EXA_TYPE"
-DEFAULT_EXA_TYPE = "lite"
-# Serper mode: Exa /contents fetches the top N new results per query for page text.
-CONTENT_TOP_ENV = "DEEP_RESEARCH_CONTENT_TOP"
-DEFAULT_CONTENT_TOP = 5
-SERPER_KEY_ENV = "DEEP_RESEARCH_SERPER_KEY"
 LOG_FILE = "log.jsonl"
 QUERY_INDEX = "queries.json"
 SITE_TOKEN_RE = re.compile(r"\bsite:(\S+)", re.IGNORECASE)
@@ -234,9 +222,7 @@ def _load_mock_fixture() -> dict:
 def _mock_route(payload: dict, endpoint: str) -> dict | None:
     fixture = _load_mock_fixture()
     routes = fixture.get("routes") or []
-    if endpoint == "serper":
-        haystack = str(payload.get("q", ""))
-    elif endpoint == "search":
+    if endpoint == "search":
         haystack = str(payload.get("query", ""))
     else:
         haystack = " ".join(str(u) for u in payload.get("urls", []))
@@ -251,7 +237,7 @@ def _mock_route(payload: dict, endpoint: str) -> dict | None:
             continue
         matches.append((idx, route))
     if not matches:
-        default_key = {"contents": "default_contents", "serper": "default_serper"}.get(endpoint, "default")
+        default_key = "default_contents" if endpoint == "contents" else "default"
         default = fixture.get(default_key)
         return {"responses": [default]} if default else None
     # most specific match wins: longest matched needle, then declaration order
@@ -282,10 +268,7 @@ def _mock_response(endpoint: str, payload: dict) -> dict:
 def http_post_json(url: str, payload: dict, api_key: str | None = None, timeout: float = 45.0,
                    headers: dict[str, str] | None = None) -> dict:
     """POST JSON, return parsed JSON. Raises HttpError on any failure."""
-    if url == SERPER_SEARCH_URL:
-        endpoint = "serper"
-    else:
-        endpoint = "contents" if url.endswith("/contents") else "search"
+    endpoint = "contents" if url.endswith("/contents") else "search"
     if os.environ.get(MOCK_ENV):
         return _mock_response(endpoint, payload)
     body = json.dumps(payload).encode("utf-8")
@@ -344,60 +327,6 @@ def default_max_chars() -> int:
         note(f"warning: {MAX_CHARS_ENV}={value} is below 1; using {DEFAULT_MAX_CHARS}")
         return DEFAULT_MAX_CHARS
     return value
-
-
-def default_content_top() -> int:
-    """Page texts fetched per query in Serper mode: DEEP_RESEARCH_CONTENT_TOP, then 5."""
-    raw = os.environ.get(CONTENT_TOP_ENV, "").strip()
-    if not raw:
-        return DEFAULT_CONTENT_TOP
-    try:
-        value = int(raw)
-    except ValueError:
-        note(f"warning: {CONTENT_TOP_ENV}={raw!r} is not an integer; using {DEFAULT_CONTENT_TOP}")
-        return DEFAULT_CONTENT_TOP
-    if value < 0:
-        note(f"warning: {CONTENT_TOP_ENV}={value} is below 0; using {DEFAULT_CONTENT_TOP}")
-        return DEFAULT_CONTENT_TOP
-    return value
-
-
-def search_provider() -> str:
-    """Search backend: DEEP_RESEARCH_SEARCH_PROVIDER, then "exa"."""
-    raw = os.environ.get(SEARCH_PROVIDER_ENV, "").strip().lower()
-    if not raw:
-        return DEFAULT_SEARCH_PROVIDER
-    if raw not in ("exa", "serper"):
-        die(
-            f"error: {SEARCH_PROVIDER_ENV}={raw!r} is invalid; choose 'exa' (default) or 'serper'.",
-            2,
-        )
-    return raw
-
-
-def exa_search_type() -> str:
-    """Exa /search type: DEEP_RESEARCH_EXA_TYPE, then "lite"."""
-    raw = os.environ.get(EXA_TYPE_ENV, "").strip().lower()
-    if not raw:
-        return DEFAULT_EXA_TYPE
-    if raw not in ("auto", "lite"):
-        die(
-            f"error: {EXA_TYPE_ENV}={raw!r} is invalid; choose 'lite' (default) or 'auto'.",
-            2,
-        )
-    return raw
-
-
-def serper_key_required() -> str:
-    key = os.environ.get(SERPER_KEY_ENV, "").strip()
-    if not key:
-        die(
-            f"error: {SERPER_KEY_ENV} is not set.\n"
-            "Serper mode needs a Serper API key:\n"
-            f"  hermes config set {SERPER_KEY_ENV} <your key>",
-            2,
-        )
-    return key
 
 
 def split_site_operators(query: str) -> tuple[str, list[str]]:
@@ -464,7 +393,7 @@ def exa_search(query: str, num_results: int, max_chars: int, api_key: str) -> tu
     query_text, domains = split_site_operators(query)
     payload = {
         "query": query_text,
-        "type": exa_search_type(),
+        "type": "lite",
         "numResults": num_results,
         "contents": {"text": {"maxCharacters": max_chars}, "highlights": True},
     }
@@ -482,138 +411,17 @@ def exa_search(query: str, num_results: int, max_chars: int, api_key: str) -> tu
     return results, cost
 
 
-def serper_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], float]:
-    payload = {"q": query, "num": num_results}
-    data = http_post_json(SERPER_SEARCH_URL, payload, headers={"X-API-KEY": api_key})
-    organic = data.get("organic") or []
-    if not isinstance(organic, list):
-        organic = []
-    results: list[dict] = []
-    for item in organic:
-        if not isinstance(item, dict):
-            continue
-        url = str(item.get("link") or "").strip()
-        if not url:
-            continue
-        snippet = str(item.get("snippet") or "").strip()
-        results.append({
-            "url": url,
-            "title": str(item.get("title") or "").strip(),
-            "publishedDate": item.get("date") or "",
-            "highlights": [snippet] if snippet else [],
-        })
-    credits = data.get("credits")
-    try:
-        cost = float(credits) * SERPER_USD_PER_CREDIT if credits is not None else SERPER_USD_PER_CREDIT
-    except (TypeError, ValueError):
-        cost = SERPER_USD_PER_CREDIT
-    return results, cost
-
-
-def exa_contents_batch(urls: list[str], max_chars: int, api_key: str) -> tuple[list[dict], float]:
-    payload = {"urls": urls, "text": {"maxCharacters": max_chars}}
+def exa_contents(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
+    payload = {"urls": [url], "text": {"maxCharacters": max_chars}}
     data = http_post_json(EXA_CONTENTS_URL, payload, api_key)
     results = data.get("results") or []
-    if not isinstance(results, list):
-        results = []
+    if not results or not isinstance(results[0], dict):
+        raise HttpError(502, f"/contents returned no result for {url}")
     try:
         cost = float((data.get("costDollars") or {}).get("total") or 0.0)
     except (TypeError, ValueError):
         cost = 0.0
-    return results, cost
-
-
-def exa_contents(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
-    results, cost = exa_contents_batch([url], max_chars, api_key)
-    if not results or not isinstance(results[0], dict):
-        raise HttpError(502, f"/contents returned no result for {url}")
     return results[0], cost
-
-
-def content_fetch_items(records: list[dict], registry: dict, top: int) -> list[tuple[dict, dict, str]]:
-    """Pick the page texts to fetch in Serper mode.
-
-    Per record: the first *top* results whose normalized URL has no text in the
-    registry; the URL set is deduped across all records of this invocation.
-    Returns [(record, result_item, normalized_url)].
-    """
-    with_text = {
-        normalize_url(src.get("url", ""))
-        for src in registry.get("sources") or []
-        if str(src.get("text") or "").strip()
-    }
-    picked: list[tuple[dict, dict, str]] = []
-    seen: set[str] = set()
-    for record in records:
-        if not record.get("ok"):
-            continue
-        count = 0
-        for item in record.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            norm = normalize_url(item.get("url", ""))
-            if not norm or norm in with_text:
-                continue
-            if count >= top:
-                break
-            count += 1
-            if norm in seen:
-                continue
-            seen.add(norm)
-            picked.append((record, item, norm))
-    return picked
-
-
-def fetch_content_texts(picked: list[tuple[dict, dict, str]], max_chars: int, api_key: str,
-                        workers: int) -> float:
-    """Fetch page text for *picked* in batches of 25. Returns the total cost.
-
-    Failures are reported on stderr and never fatal: those sources keep the
-    Serper snippet. Cost is attributed evenly to the URLs in each batch so
-    per-query log records still add up to the invocation's cost.
-    """
-    if not picked:
-        return 0.0
-    groups = [picked[i:i + CONTENTS_BATCH_SIZE] for i in range(0, len(picked), CONTENTS_BATCH_SIZE)]
-
-    def run_group(group: list[tuple[dict, dict, str]]) -> tuple[list[dict], float]:
-        urls = [item.get("url", "") for _record, item, _norm in group]
-        return with_retries(
-            lambda: exa_contents_batch(urls, max_chars, api_key), 3, f"contents batch ({len(urls)} urls)"
-        )
-
-    total = 0.0
-    workers = max(1, min(workers, len(groups)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        future_map = {pool.submit(run_group, group): group for group in groups}
-        for future in concurrent.futures.as_completed(future_map):
-            group = future_map[future]
-            try:
-                results, cost = future.result()
-            except HttpError as exc:
-                note(f"  contents fetch failed for {len(group)} url(s): {exc}")
-                continue
-            total += cost
-            texts: dict[str, str] = {}
-            for index, result in enumerate(results):
-                if not isinstance(result, dict):
-                    continue
-                text = str(result.get("text") or "")
-                for key in ("url", "id"):
-                    norm = normalize_url(str(result.get(key) or ""))
-                    if norm:
-                        texts.setdefault(norm, text)
-                if not result.get("url") and not result.get("id") and index < len(group):
-                    texts.setdefault(group[index][2], text)
-            share = cost / len(group)
-            for record, item, norm in group:
-                record["cost"] = float(record.get("cost") or 0.0) + share
-                text = texts.get(norm, "")
-                if text:
-                    item["text"] = text
-                else:
-                    note(f"  no page text for {item.get('url')} (keeping snippet only)")
-    return total
 
 
 # --------------------------------------------------------------------------
@@ -1000,15 +808,13 @@ def _run_query(query: str, num_results: int, max_chars: int, api_key: str) -> tu
     return exa_search(query, num_results, max_chars, api_key)
 
 
-def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api_key: str,
-                     provider: str = "exa") -> tuple[list[dict], int]:
+def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace,
+                     api_key: str) -> tuple[list[dict], int]:
     """Run (qid, query) pairs in parallel. Returns (records, failures)."""
     records: list[dict] = []
     failures = 0
 
     def run(query: str) -> tuple[list[dict], float]:
-        if provider == "serper":
-            return serper_search(query, args.num_results, api_key)
         return _run_query(query, args.num_results, args.max_chars, api_key)
 
     workers = max(1, min(args.workers, len(pairs) or 1))
@@ -1089,19 +895,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             for qid in sorted(counts, key=lambda q: int(q[1:])):
                 print(f"  {qid}: {counts[qid]} queries")
         return 0
-    provider = search_provider()
-    exa_search_type()  # fail fast on an invalid value, before any parallel call
-    content_top = default_content_top() if provider == "serper" else 0
-    if pairs:
-        if provider == "serper":
-            api_key = serper_key_required()
-            contents_key = exa_key_required() if content_top > 0 else ""
-        else:
-            api_key = exa_key_required()
-            contents_key = ""
-    else:
-        api_key = ""
-        contents_key = ""
+    api_key = exa_key_required() if pairs else ""
     new_queries, skipped = reserve_queries(work, [query for _qid, query in pairs])
     for query in skipped:
         print(f"skipped duplicate: {query}")
@@ -1115,14 +909,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             remaining[query] -= 1
     if effective_pairs:
         note(f"searching: {len(effective_pairs)} queries with {args.workers} workers")
-        records, failures = _execute_queries(effective_pairs, args, api_key, provider)
-        if provider == "serper" and content_top > 0:
-            with sources_lock(work):
-                snapshot = load_registry(work / "sources.json", slug)
-            picked = content_fetch_items(records, snapshot, content_top)
-            if picked:
-                note(f"fetching page text for {len(picked)} url(s) via Exa /contents")
-                fetch_content_texts(picked, args.max_chars, contents_key, args.workers)
+        records, failures = _execute_queries(effective_pairs, args, api_key)
     else:
         records, failures = [], 0
 
@@ -1147,7 +934,6 @@ def cmd_search(args: argparse.Namespace) -> int:
                 "new_ids": new_ids,
                 "matched_ids": touched,
                 "fetched_id": None,
-                "provider": provider,
                 "cost": round(run_cost, 6),
                 "ok": not errors,
                 "error": "; ".join(errors) or None,
@@ -1161,7 +947,6 @@ def cmd_search(args: argparse.Namespace) -> int:
                 "new_ids": change["new_ids"],
                 "matched_ids": change["matched_ids"],
                 "fetched_id": None,
-                "provider": provider,
                 "cost": round(float(record.get("cost") or 0.0), 6),
                 "ok": bool(record.get("ok")),
                 "error": record.get("error"),
