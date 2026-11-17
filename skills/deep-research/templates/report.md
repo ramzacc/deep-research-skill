@@ -67,5 +67,5 @@
 - Queries run: <N>
 - Unique sources reviewed: <N>
 - Research date: <YYYY-MM-DD>
-- Search backend: DeepSeek Search & Fetch
+- Search backend: Exa (lite)
 - Search spend: $<from the script's final cost line>

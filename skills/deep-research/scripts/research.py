@@ -484,7 +484,7 @@ def exa_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], 
             "publishedDate": item.get("publishedDate") or "",
             "summary": summary,
             "content": str(item.get("text") or "")[:PAGE_MAX_CHARS],
-            # Exa returns no score; keep its relevance order on DeepSeek's 0-3 rerank scale.
+            # Exa returns no score; keep its relevance order on the existing 0-3 rerank scale.
             "rerank": round(max(0.5, 2.0 - 0.1 * position), 2),
         })
     return results, _cost_dollars(data)
@@ -1086,7 +1086,7 @@ def render_evidence(qid: str, question: str, sources: list[dict], work: Path,
     rest = ranked[DIGEST_FULL_LIMIT:]
     lines += [
         f"{len(sources)} candidate sources. Cite them as [S#]; ids are stable.",
-        f"Full sections for the top {len(full)} (best recency, then authority and date); the "
+        f"Full sections for the top {len(full)} (best relevance and recency, then authority and date); the "
         "rest are one-liners you can still fetch with `fetch --id S#` and find with "
         "`recent --grep`.",
         "",

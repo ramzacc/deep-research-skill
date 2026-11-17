@@ -12,8 +12,9 @@ out what the evidence supports on each side and what would tip the balance.
 
 The reasoning lives in a rigid checklist (`SKILL.md`); the deterministic parts live in one
 stdlib-only Python script, so a small model can follow the pipeline without improvising. Search
-and page fetching use DeepSeek's Search & Fetch API ($0.00075 per successful request, flat
-regardless of result count).
+and page fetching use Exa's Search & Contents API (type "lite": $0.004 per search including
+page text for up to 10 results, $0.001 per `/contents` page; the page cache makes most fetches
+free).
 
 ## Install
 
@@ -38,7 +39,7 @@ hermes skills update deep-research
 
 | Requirement | Why |
 |---|---|
-| `DEEP_RESEARCH_DEEPSEEK_KEY` | search + page fetching (the skill calls DeepSeek's Search & Fetch API directly) |
+| `DEEP_RESEARCH_EXA_KEY` | search + page fetching (the skill calls Exa's Search & Contents API directly) |
 | `terminal` toolset enabled | runs `research.py` |
 | Python 3.10+ | the script is stdlib-only |
 | `delegate_task` (optional but recommended) | parallel per-subquestion researchers |
@@ -46,12 +47,13 @@ hermes skills update deep-research
 Set the key on the machine that runs Hermes:
 
 ```bash
-hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <your-deepseek-key>
+hermes config set DEEP_RESEARCH_EXA_KEY <your-exa-key>
 ```
 
-`DEEP_RESEARCH_DEEPSEEK_KEY` is a normal skill-declared variable, so Hermes registers it for the
-terminal after the skill loads. A running gateway picks up the new value on the next turn; start
-a new CLI chat after setting it.
+`DEEP_RESEARCH_EXA_KEY` is a normal skill-declared variable, so Hermes registers it for the
+terminal after the skill loads. Hermes strips `EXA_API_KEY` from the terminal sandbox, so the
+skill-declared variable is required even if `EXA_API_KEY` is set. A running gateway picks up the
+new value on the next turn; start a new CLI chat after setting it.
 
 Recommended delegation setting in `~/.hermes/config.yaml` so a full batch runs at once:
 
@@ -109,7 +111,7 @@ which step to continue from.
    citation, renumbers them `[1]`, `[2]`, ... in order of first appearance, turns them into
    clickable links, appends `## References`, and warns about numbers missing from their cited
    page, dates that have passed, and Summary/Implications claims supported only by social/forum
-   or low-authority sources.
+   sources.
 8. The agent runs every `post_actions` item from `plan.json` (for example, updating a
    task with the summary and report path).
 9. The reply ends with `MEDIA:/abs/path/<slug>.md` and confirms each post-action.
@@ -138,9 +140,10 @@ duplicate ids or lose sources.
 summary or cached page contain every term, newest first by date or year hint, so the agent can
 find the newest source for a value before citing it.
 
-Evidence digests rank sources by DeepSeek rerank plus a recency bonus (≤90 days +0.6, ≤365 days
-+0.3, >2 years -0.4; undated pages get a year hint from their URL/title), and tag
-`possibly-outdated` sources. `search --today YYYY-MM-DD` pins the ranking date (default: today).
+Evidence digests rank sources by Exa's relevance order (a position score) plus a recency bonus
+(≤90 days +0.6, ≤365 days +0.3, >2 years -0.4; undated pages get a year hint from their
+URL/title), and tag `social/forum` and `possibly-outdated` sources. `search --today YYYY-MM-DD`
+pins the ranking date (default: today).
 
 `fetch` prints the cached page when one exists (no network, no cost) and otherwise fetches it
 once, caching it in `pages/`. `--grep TERM` prints ±400-character windows around every match
@@ -148,8 +151,10 @@ with character offsets, so a number can be confirmed on a 50k-character page; it
 `no matches` when the term is not there. `fetch --url` registers a URL that search missed as a
 new `S#` and appends it to that subquestion's evidence.
 
-`--num-results` defaults to 20, or to `DEEP_RESEARCH_NUM_RESULTS` when the flag is omitted.
-Search is billed per request, not per result, so 20 results cost the same as 8.
+`--num-results` defaults to 10, or to `DEEP_RESEARCH_NUM_RESULTS` when the flag is omitted.
+Exa lite's base price covers up to 10 results per search; a typical eval run spends about
+$0.40 on search. Each search already returns page text, so the page cache makes most `fetch`
+calls free.
 Each work dir also gets `log.jsonl`: one JSON line per `search_batch`, `search_adhoc`, `fetch`
 and `finalize` operation (query, new/matched source ids, cost, ok/error), appended under the
 same lock. `final.json` records the final `S#` → reference-number mapping and the paragraph
@@ -162,9 +167,9 @@ citation coverage.
 
 | Symptom | Fix |
 |---|---|
-| `DEEP_RESEARCH_DEEPSEEK_KEY is not set` | run `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`, then re-run |
-| `HTTP 401/403` | invalid/expired DeepSeek key |
-| `HTTP 402` | insufficient DeepSeek balance; top up the account |
+| `DEEP_RESEARCH_EXA_KEY is not set` | run `hermes config set DEEP_RESEARCH_EXA_KEY <key>`, then re-run |
+| `HTTP 401/403` | invalid/expired Exa key |
+| `HTTP 402` | Exa credits exhausted; top up the account |
 | `HTTP 429/5xx` after retries | provider rate limit; lower `--workers` (default 8) or retry later |
 | `plan.json is invalid` | the error lists exact fields; validate with `search --dry-run` |
 | `unknown source ids` from `finalize` | the draft cites an id that is not in `sources.json`; remove the claim or search for real evidence — never invent ids |
@@ -183,15 +188,16 @@ python3 -m pytest -q tests
 Tests are fully offline. The HTTP layer is replaced by a JSON fixture selected with the
 **test-only** environment variables:
 
-- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake DeepSeek `/tools/search` and
-  `/tools/fetch` responses (`contains` matches the query or URL; supports status codes,
-  per-route response sequences, and artificial `delay`), with an optional `default_deepseek`.
+- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search` and `/contents`
+  responses (`contains` matches the query or URL; supports status codes, per-route response
+  sequences, and artificial `delay`), with optional `default_search`, `default_contents` and
+  `default` fixtures.
 - `DEEP_RESEARCH_BACKOFF_BASE=0` — disables retry sleeps in tests.
 
 Production knobs:
 
-- `DEEP_RESEARCH_DEEPSEEK_KEY` — the DeepSeek key used by the scripts (required; missing exits 2).
-- `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 20; `--num-results` wins).
+- `DEEP_RESEARCH_EXA_KEY` — the Exa key used by the scripts (required; missing exits 2).
+- `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 10; `--num-results` wins).
 - `DEEP_RESEARCH_MAX_CHARS` — short page-text characters per source in `sources.json`
   (default 6000; `--max-chars` wins).
 

@@ -232,11 +232,10 @@ context: |
 
   STEP 1 — Read <WORK>/evidence/<QID>.md (a digest of candidate sources with stable S-ids).
   It quotes the passages of each page that best match this subquestion, and lists weaker
-  candidates as one-liners you can still fetch. Sources are ranked by a recency bonus plus
-  their date (Exa lite returns no authority or rerank scores), so an official 2021 PDF does
-  not outrank this month's notice. The tags `social/forum` and `possibly-outdated` mark weak
-  sources: use them as leads, never as the only support for a number, and check freshness
-  with `recent --grep` before using a value.
+  candidates as one-liners you can still fetch. Sources are ranked by Exa's relevance order
+  plus a recency bonus, so an official 2021 PDF does not outrank this month's notice. The tags
+  `social/forum` and `possibly-outdated` mark weak sources: use them as leads, never as the only
+  support for a number, and check freshness with `recent --grep` before using a value.
 
   STEP 2 — Follow-up research: at most 6 search calls. Fetch at least 3 and at most 8 pages
   total (fetch is cheap — cached pages are free):
@@ -459,8 +458,8 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
   move it to Not verified. Re-run finalize once; a few remaining warnings are acceptable.
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
   paragraphs (the report is still written; do not ignore this).
-- `warning: N Summary/Implications sentence(s)/cell(s) cite only social/forum or low-authority
-  sources` → that claim rests on weak support. Search for an official/primary source and
+- `warning: N Summary/Implications sentence(s)/cell(s) cite only social/forum sources`
+  → that claim rests on weak support. Search for an official/primary source and
   fetch it, then cite that; if none exists, mark the claim `confidence: "low"` and say so in
   Debates and evidence strength or Not verified. Do not leave a price, requirement or deadline
   on a forum post, Q&A page, social media, WeChat, LinkedIn or blog alone.

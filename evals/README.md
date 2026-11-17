@@ -3,7 +3,7 @@
 Runs the real deep-research skill end to end inside an isolated Hermes Agent
 (`evals/.run/hermes-venv`, locked dev install of NousResearch/hermes-agent main on
 Python 3.14; PyPI 0.19.0 does not send `x-opencode-session`) against
-`deepseek-v4.1-flash` on OpenCode Go, then packages the reports blind for a
+the pinned OpenCode Go model, then packages the reports blind for a
 qualitative ranking.
 
 ## Privacy
@@ -14,7 +14,7 @@ mode 600). `run.py` uses it when present and falls back to the tracked
 contents live under `evals/results/` (gitignored) and are never copied into
 tracked files. Secrets live in `evals/.env` (gitignored, mode 600) and are only
 written to per-run `HERMES_HOME/.env` files (mode 600) under `evals/.run/`.
-The DeepSeek key is written there as `DEEP_RESEARCH_DEEPSEEK_KEY` (the skill's
+The Exa key is written there as `DEEP_RESEARCH_EXA_KEY` (the skill's
 declared variable).
 
 ## Setup
@@ -23,11 +23,11 @@ declared variable).
 git clone --depth 1 https://github.com/NousResearch/hermes-agent evals/.run/hermes-src
 UV_PROJECT_ENVIRONMENT=$PWD/evals/.run/hermes-venv \
   uv sync --project evals/.run/hermes-src --no-dev
-# evals/.env: OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL, DEEPSEEK_API_KEY
+# evals/.env: OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL, EXA_API_KEY
 chmod 600 evals/.env
 ```
 
-Each run writes `DEEP_RESEARCH_DEEPSEEK_KEY` into its `HERMES_HOME/.env`; the
+Each run writes `DEEP_RESEARCH_EXA_KEY` into its `HERMES_HOME/.env`; the
 skill declares that variable, so Hermes registers it for the terminal sandbox
 through the real `required_environment_variables` passthrough. No `python3`
 shim and no manual export.
@@ -46,8 +46,9 @@ to redo one. Runs are ordered rep 1 first, topic by topic. `--max-exa-usd X`
 stops starting new runs once the batch's finished plus in-flight search spend
 reaches X; in-flight runs finish, and re-invoking with a higher cap resumes the
 remainder. `--max-exa-usd` and the stats field `exa_cost_usd` keep their old
-names but now measure DeepSeek Search & Fetch spend from `sources.json`
-`cost_dollars` (at $0.00075 per successful request, ~$0.10 per report).
+names but now measure Exa spend from `sources.json` `cost_dollars` (at $0.004
+per search including page text for up to 10 results and $0.001 per `/contents`
+page, ~$0.40 per report).
 
 ## Package and score
 
@@ -69,7 +70,7 @@ rest run. `score.py` joins the ranking with the stats and writes `SUMMARY.md`
 
 | Config | Skill | Results/query | Chars/source | Follow-ups | Delegation |
 |---|---|---|---|---|---|
-| K | shipped, unpatched | 20 | 6000 (+ full page cache) | 6 search / 3-8 fetch | yes |
+| K | shipped, unpatched | 10 | 6000 (+ full page cache) | 6 search / 3-8 fetch | yes |
 
 `evals/variants.py` copies `skills/deep-research/` unchanged for config K;
 `--check` verifies the copy is byte-identical. `DEEP_RESEARCH_NUM_RESULTS` and
