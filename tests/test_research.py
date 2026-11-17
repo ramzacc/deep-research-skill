@@ -610,7 +610,7 @@ def test_finalize_renumbers_links_and_references(tmp_path, capsys):
         "First claim about the market [S3].\n\n"
         "Second paragraph with two sources [S1, S2].\n\n"
         "Third paragraph with adjacent citations [S2][S4].\n\n"
-        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
+        "## Resumen\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "final.md"
@@ -678,7 +678,7 @@ def test_finalize_warns_on_low_citation_coverage(tmp_path, capsys):
     draft = work / "draft.md"
     draft.write_text(
         "# Title\n\nCited one [S1].\n\nUncited two.\n\nUncited three.\n\nUncited four.\n\n"
-        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
+        "## Resumen\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "f.md"
@@ -694,7 +694,7 @@ def test_finalize_replaces_existing_references_section(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
     draft.write_text(
-        "# Title\n\nClaim [S1].\n\n## Resumen\n\n## Qué hacer\n\n## No verificado\n\n"
+        "# Title\n\nClaim [S1].\n\n## Resumen\n\n## Implicaciones\n\n## No verificado\n\n"
         "## References\n\n1. Stale entry. https://stale.example\n",
         encoding="utf-8",
     )
@@ -712,7 +712,7 @@ def test_finalize_spanish_references_heading(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
     draft.write_text(
-        "# Título\n\n## Resumen\n\nDato [S1].\n\n## Qué hacer\n\n## No verificado\n",
+        "# Título\n\n## Resumen\n\nDato [S1].\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "final.md"
@@ -732,7 +732,7 @@ def test_finalize_auto_detects_spanish(tmp_path, capsys):
     draft = work / "draft.md"
     draft.write_text(
         "# Título\n\n## Resumen\n\nLa tasa de la que hablamos es de 5 % y el plazo es amplio [S1].\n\n"
-        "## Qué hacer\n\n## No verificado\n",
+        "## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "final.md"
@@ -746,8 +746,8 @@ def test_finalize_auto_detects_spanish(tmp_path, capsys):
 
 def test_report_template_has_required_sections():
     template = (SCRIPT.parent.parent / "templates" / "report.md").read_text(encoding="utf-8")
-    for heading in ("## Summary", "## Disagreements & uncertainties", "## Not verified",
-                    "## What to do", "## Assumptions", "## Methodology"):
+    for heading in ("## Summary", "## Debates and evidence strength", "## Implications",
+                    "## Open questions", "## Not verified", "## Assumptions", "## Methodology"):
         assert heading in template
 
 
@@ -762,7 +762,7 @@ def test_finalize_missing_required_sections_exits_1(tmp_path, capsys):
     assert code == 1
     assert "missing required sections" in err
     assert "Resumen/Summary" in err
-    assert "Qué hacer/What to do" in err
+    assert "Implicaciones/Implications" in err
     assert "No verificado/Not verified" in err
 
 
@@ -771,7 +771,7 @@ def test_finalize_warns_on_long_report(tmp_path, capsys):
     draft = work / "draft.md"
     body = " ".join(["word"] * 9005)
     draft.write_text(
-        "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Qué hacer\n\n## No verificado\n",
+        "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     code, _out, err = run_cli(
@@ -787,7 +787,7 @@ def test_finalize_allows_medium_long_report(tmp_path, capsys):
     draft = work / "draft.md"
     body = " ".join(["word"] * 5005)
     draft.write_text(
-        "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Qué hacer\n\n## No verificado\n",
+        "# Title\n\n## Resumen\n\n" + body + " [S1].\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     code, _out, err = run_cli(
@@ -803,7 +803,7 @@ def test_finalize_warns_on_past_deadline(tmp_path, capsys):
     draft = work / "draft.md"
     draft.write_text(
         "# Title\n\n## Resumen\n\nThe application deadline is 2025-01-01 [S1].\n\n"
-        "## Qué hacer\n\n## No verificado\n",
+        "## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     code, _out, err = run_cli(
@@ -811,7 +811,8 @@ def test_finalize_warns_on_past_deadline(tmp_path, capsys):
         capsys,
     )
     assert code == 0
-    assert "mentions a deadline date in the past" in err
+    assert "mentions a deadline that has passed" in err
+    assert "informational only" in err
     assert "2025-01-01" in err
 
 
@@ -829,8 +830,8 @@ def test_finalize_warns_on_weak_only_citations(tmp_path, capsys):
         "## Summary\n\n"
         "- The pack costs S/ 9.90 [S1].\n"
         "- The official tariff is S/ 0.72 per kWh [S2].\n\n"
-        "## What to do\n\n"
-        "1. Buy the pack at S/ 9.90 [S1, S2].\n\n"
+        "## Implications\n\n"
+        "The pack costs S/ 9.90 and the tariff is S/ 0.72 per kWh [S1, S2].\n\n"
         "## Not verified\n",
         encoding="utf-8",
     )
@@ -839,10 +840,94 @@ def test_finalize_warns_on_weak_only_citations(tmp_path, capsys):
         ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
     )
     assert code == 0, err
+    assert "Summary/Implications sentence(s)/cell(s)" in err
     assert "cite only social/forum or low-authority sources" in err
     assert "S1:" in err
     assert "S1, S2" not in err
     assert out.exists()
+
+
+def test_finalize_passes_with_reporter_sections_en(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n"
+        "## Summary\n\nA claim [S1].\n\n"
+        "## Implications\n\nThe options differ on cost [S2].\n\n"
+        "## Open questions\n\nNothing settled.\n\n"
+        "## Not verified\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out),
+         "--lang", "en"], capsys,
+    )
+    assert code == 0, err
+    assert "## References" in out.read_text(encoding="utf-8")
+    assert "missing required sections" not in err
+
+
+def test_finalize_passes_with_reporter_sections_es(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Título\n\n"
+        "## Resumen\n\nUn dato [S1].\n\n"
+        "## Implicaciones\n\nLas opciones difieren en costo [S2].\n\n"
+        "## Preguntas abiertas\n\nNada concluyente.\n\n"
+        "## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out),
+         "--lang", "es"], capsys,
+    )
+    assert code == 0, err
+    assert "## Referencias" in out.read_text(encoding="utf-8")
+
+
+def test_finalize_rejects_the_old_what_to_do_heading(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n## Summary\n\nA claim [S1].\n\n"
+        "## What to do\n\n1. Do the thing [S1].\n\n## Not verified\n",
+        encoding="utf-8",
+    )
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(tmp_path / "f.md")],
+        capsys,
+    )
+    assert code == 1
+    assert "missing required sections" in err
+    assert "Implicaciones/Implications" in err
+
+
+def test_weak_source_warning_fires_in_implications(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    write_registry(work, [
+        source("S1", "https://www.facebook.com/group/post", "Facebook post",
+               authority=0, summary="A user says the pack costs S/ 9.90."),
+        source("S2", "https://gob.pe/tarifas", "Official tariffs", authority=4,
+               summary="Official tariff: S/ 0.72 per kWh."),
+    ])
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n"
+        "## Summary\n\nThe official tariff is S/ 0.72 per kWh [S2].\n\n"
+        "## Implications\n\nA forum user says the pack costs S/ 9.90 [S1].\n\n"
+        "## Not verified\n",
+        encoding="utf-8",
+    )
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(tmp_path / "f.md")],
+        capsys,
+    )
+    assert code == 0, err
+    assert "Summary/Implications sentence(s)/cell(s)" in err
+    assert "line 9: S1" in err
 
 
 def test_validate_finding_shape():
@@ -1352,7 +1437,7 @@ def test_citation_support_flags_numbers_missing_from_cited_source():
 
 def test_citation_support_silent_when_supported():
     by_id = {"S1": {"id": "S1", "title": "t", "text": "Deadline 03/12/2026, fee R$ 241,22."}}
-    text = "## Qué hacer\nPostula antes del 03/12/2026 y paga R$ 241,22 [S1]."
+    text = "## Implicaciones\nPostula antes del 03/12/2026 y paga R$ 241,22 [S1]."
     assert research._citation_support_warnings(text, by_id) == []
 
 
@@ -1500,7 +1585,7 @@ def test_finalize_rejects_bare_source_ids_in_a_table(tmp_path, capsys):
         "| Local | S1, S2 |\n"
         "| Import | S3 |\n\n"
         "Claim with a real citation [S1].\n\n"
-        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
+        "## Resumen\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "f.md"
@@ -1525,7 +1610,7 @@ def test_finalize_ignores_unknown_bare_tokens_and_bracketed_ids(tmp_path, capsys
     draft.write_text(
         "# Title\n\n"
         "Model S999 is not a source; the claim is supported [S1].\n\n"
-        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
+        "## Resumen\n\n## Implicaciones\n\n## No verificado\n",
         encoding="utf-8",
     )
     out = tmp_path / "f.md"

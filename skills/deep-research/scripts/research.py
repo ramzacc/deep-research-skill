@@ -1692,7 +1692,7 @@ def _normalize_heading(text: str) -> str:
 
 REQUIRED_SECTIONS = (
     ("Resumen/Summary", ("resumen", "summary")),
-    ("Qué hacer/What to do", ("que hacer", "what to do")),
+    ("Implicaciones/Implications", ("implicaciones", "implications")),
     ("No verificado/Not verified", ("no verificado", "not verified")),
 )
 
@@ -1777,8 +1777,8 @@ def _date_warnings(text: str) -> list[str]:
         for value, start, _end in dates:
             if value < today and any(abs(keyword.start() - start) <= 80 for keyword in keywords):
                 warnings.append(
-                    f"warning: line {lineno} mentions a deadline date in the past "
-                    f"({value.isoformat()}): {line.strip()[:180]}"
+                    f"warning: line {lineno} mentions a deadline that has passed "
+                    f"({value.isoformat()}); informational only: {line.strip()[:180]}"
                 )
                 break
     return warnings
@@ -1788,7 +1788,7 @@ NUMBER_RE = re.compile(r"\d[\d.,]*\d|\d")
 COMPUTED_RE = re.compile(r"≈|c[áa]lculo|calculat|estimad|estimat|supuesto|assum", re.IGNORECASE)
 SUPPORT_SKIP_SECTIONS = ("supuestos", "assumptions", "metodologia", "methodology")
 SUPPORT_WARN_LIMIT = 25
-WEAK_SECTIONS = ("resumen", "summary", "que hacer", "what to do")
+WEAK_SECTIONS = ("resumen", "summary", "implicaciones", "implications")
 WEAK_WARN_LIMIT = 10
 
 
@@ -1884,7 +1884,7 @@ def _weak_source_warnings(text: str, by_id: dict) -> list[str]:
     if not problems:
         return []
     warnings = [
-        f"warning: {len(problems)} Summary/What-to-do sentence(s)/cell(s) cite only "
+        f"warning: {len(problems)} Summary/Implications sentence(s)/cell(s) cite only "
         "social/forum or low-authority sources:"
     ]
     for lineno, ids, claim in problems[:WEAK_WARN_LIMIT]:
