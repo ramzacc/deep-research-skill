@@ -115,6 +115,7 @@ python3 skills/deep-research/scripts/research.py search --work DIR --subq q3 --q
 python3 skills/deep-research/scripts/research.py fetch --work DIR --id S12
 python3 skills/deep-research/scripts/research.py fetch --work DIR --id S12 --grep "5.699" --grep "tarifa"
 python3 skills/deep-research/scripts/research.py fetch --work DIR --url https://example.com/doc --subq q3
+python3 skills/deep-research/scripts/research.py recent --work DIR --grep tarifa kWh
 python3 skills/deep-research/scripts/research.py finalize --work DIR --draft DIR/draft.md --out ~/research/slug.md
 python3 skills/deep-research/scripts/research.py status --work DIR
 ```
@@ -123,6 +124,14 @@ python3 skills/deep-research/scripts/research.py status --work DIR
 reported and skipped so the run continues. Concurrent ad-hoc searches are safe: sources are
 merged under an exclusive `flock` with atomic replacement, so parallel researchers never
 duplicate ids or lose sources.
+
+`recent --grep TERM [TERM...]` is local (no request): it lists registered sources whose title,
+summary or cached page contain every term, newest first by date or year hint, so the agent can
+find the newest source for a value before citing it.
+
+Evidence digests rank sources by DeepSeek rerank plus a recency bonus (≤90 days +0.6, ≤365 days
++0.3, >2 years -0.4; undated pages get a year hint from their URL/title), and tag
+`possibly-outdated` sources. `search --today YYYY-MM-DD` pins the ranking date (default: today).
 
 `fetch` prints the cached page when one exists (no network, no cost) and otherwise fetches it
 once, caching it in `pages/`. `--grep TERM` prints ±400-character windows around every match
