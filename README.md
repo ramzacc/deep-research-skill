@@ -134,6 +134,7 @@ citation coverage.
 | `HTTP 429` after retries | Exa rate limit; lower `--workers` (default 8) or retry later |
 | `plan.json is invalid` | the error lists exact fields; validate with `search --dry-run` |
 | `unknown source ids` from `finalize` | the draft cites an id that is not in `sources.json`; remove the claim or search for real evidence — never invent ids |
+| `bare source ids` from `finalize` | a known id appears outside `[S#]` (including table cells like `S3, S7`); write `[S3], [S7]` or remove the text |
 | Research stops mid-run | ask "continue the research"; the agent runs `status` and resumes from the work dir |
 | Researchers return no findings / their terminal commands are denied | subagents auto-deny approval prompts by default; set `hermes config set delegation.subagent_auto_approve true` and restart the gateway |
 | Hub install misses a file | `SKILL.md` must literally reference every bundled path; both are referenced |

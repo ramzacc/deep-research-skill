@@ -319,7 +319,8 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    them in a markdown table (one row per option, one column per attribute, citations inside
    the cells) and keep the prose around it to 1-3 sentences that say what the table means.
    Do not pad: a typical report is 4,000-7,000 words. Do not leave HTML comments in the body. Do
-   not add a References heading — `finalize` adds the localized one.
+   not add a References heading — `finalize` adds the localized one. Sources appear only as
+   `[S#]` citations, never as bare ids, including in tables.
 6. Before finalizing, re-read the whole draft once and fix these four things:
    - **Cite the right source.** A number or proper name next to `[S#]` must appear in S#'s
      text. If it came from another source, cite that one; if you cannot find it, move it to
@@ -351,6 +352,8 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
   the claim or search for the missing evidence
   (`python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "..."`),
   then cite the new id. Never invent a replacement id.
+- `error: ... bare source ids` → a known id appears outside `[S#]` brackets (for example `S3, S7`
+  in a table cell); write it as a citation (`[S3], [S7]`) or remove the text.
 - `error: the draft contains no citations` → rewrite with citations.
 - `error: the draft is missing required sections` → add the listed sections in the report
   language (`Summary`/`Resumen`, `What to do`/`Qué hacer`, `Not verified`/`No verificado`)

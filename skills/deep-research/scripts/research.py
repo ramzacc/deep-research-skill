@@ -1303,6 +1303,30 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         die(f"error: cannot read draft {draft_path}: {exc}", 2)
     language = getattr(args, "lang", None) or detect_language(text)
 
+    bare: list[tuple[str, int]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for match in re.finditer(r"\bS[0-9]+\b", CITE_RE.sub("", line)):
+            if match.group(0) in by_id:
+                bare.append((match.group(0), lineno))
+    if bare:
+        note("error: the draft contains bare source ids. Cite them as [S#] or remove the text:")
+        by_line: dict[int, list[str]] = {}
+        for sid, lineno in bare:
+            by_line.setdefault(lineno, [])
+            if sid not in by_line[lineno]:
+                by_line[lineno].append(sid)
+        for lineno in sorted(by_line):
+            note(f"  line {lineno}: {', '.join(by_line[lineno])}")
+        append_log(work, {
+            "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+            "fetched_id": None, "cost": None, "ok": False,
+            "error": "bare source ids: " + ", ".join(
+                f"{sid} on line {lineno}" for sid, lineno in bare
+            ),
+            "report": str(out_path),
+        })
+        return 1
+
     unknown: list[tuple[str, int]] = []
     order: list[str] = []
     for lineno, line in enumerate(text.splitlines(), 1):
