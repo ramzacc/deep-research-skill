@@ -39,8 +39,9 @@
 ## What to do
 
 <!-- The actionable conclusion. Numbered concrete steps tailored to user_context; each step
-     carries its date/deadline (only open ones) and a [S#] citation. Add a short shortlist or
-     decision table when the answer is a comparison. -->
+     carries its date/deadline (only open ones), its value with the unit and as_of date exactly
+     as the source states them, and a [S#] citation. Add a short shortlist or decision table
+     when the answer is a comparison. -->
 
 1. 
 2. 
@@ -61,4 +62,5 @@
 - Queries run: <N>
 - Unique sources reviewed: <N>
 - Research date: <YYYY-MM-DD>
-- Search backend: Exa
+- Search backend: DeepSeek Search & Fetch
+- Search spend: $<from the script's final cost line>

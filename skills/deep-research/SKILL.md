@@ -12,9 +12,9 @@ version: 1.0.0
 author: ramzacc
 platforms: [linux, macos]
 required_environment_variables:
-  - name: DEEP_RESEARCH_EXA_KEY
-    prompt: Exa API key for search and page fetching
-    help: Same value as your Exa API key. Set it with `hermes config set DEEP_RESEARCH_EXA_KEY <key>`.
+  - name: DEEP_RESEARCH_DEEPSEEK_KEY
+    prompt: DeepSeek API key for search and page fetching
+    help: Set it with `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`.
     required_for: web search and page fetching
 metadata:
   hermes:
@@ -125,11 +125,17 @@ Rules:
   make the LAST subquestion an execution subquestion: "What does acting on the best options
   require for this user: steps and paperwork, timeline, total cost, main risks and a plan B?"
   It covers the asks about the decision itself. Skip it for purely informational requests.
-- 3-5 queries per subquestion. Make them diverse: (a) plain question phrasing, (b) an
-  alternative vocabulary/synonym phrasing, (c) one with the current year, (d) one aimed at
-  primary sources (`report filetype:pdf`, `site:gov`, `site:edu`, `annual report`,
-  `statistics`, `dataset`), (e) one adversarial phrasing (`criticism`, `risks`,
-  `limitations`, `failed`). Never repeat the same query twice.
+- 4-6 queries per subquestion, each 128 characters or fewer. Make them diverse: (a) plain
+  question phrasing, (b) a synonym or alternate-language phrasing (English plus the user's
+  language when the topic is local), (c) one official/primary query using `site:` on the
+  relevant government, university or official domain or country TLD (e.g.
+  `site:gob.pe tarifa electrica`), (d) when the user is in a specific country and the
+  subquestion involves prices, availability, shops, providers or regulation, one local-market
+  query with the country TLD (e.g. `site:.pe precio balon gas`), (e) one adversarial phrasing
+  (`criticism`, `risks`, `limitations`, `failed`). Never repeat the same query twice.
+- Operators that work in DeepSeek search: `site:`, `-site:`, `"exact phrase"`, `lang:`,
+  `after:`. Use `after:` only for news-type queries, never together with `lang:` (that
+  combination returns nothing), and remember it drops undated official documents.
 
 Filled-in example (3 of 4+ subquestions shown):
 
@@ -179,7 +185,9 @@ python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK>
 ```
 
 This runs every query in parallel, dedupes URLs, assigns stable `S#` ids, writes
-`<WORK>/sources.json`, and writes `<WORK>/evidence/<qid>.md` per subquestion.
+`<WORK>/sources.json`, and writes `<WORK>/evidence/<qid>.md` per subquestion. Each request
+asks for 20 results and sends the subquestion text as `ori_question`; the full page of every
+result is cached in `<WORK>/pages/<S#>.md`, so `fetch` usually costs nothing.
 
 Check the printed summary:
 - `queries: X ok, Y failed` — note failed queries; they are skipped, not fatal.
@@ -215,16 +223,33 @@ context: |
   Do not ask questions; you cannot delegate further.
 
   STEP 1 — Read <WORK>/evidence/<QID>.md (a digest of candidate sources with stable S-ids).
+  It quotes the passages of each page that best match this subquestion, and lists weaker
+  candidates as one-liners you can still fetch. The tags `social/forum` and `low-authority`
+  mark weak sources: use them as leads, never as the only support for a number.
 
-  STEP 2 — Follow-up research: at most 4 search calls. Fetch at least 2 and at most 4 pages total:
+  STEP 2 — Follow-up research: at most 6 search calls. Fetch at least 3 and at most 8 pages
+  total (fetch is cheap — cached pages are free):
     python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "your query"
     (repeat --query up to 3 times per call)
-    python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12 --max-chars 20000
-  For every price, deadline, eligibility rule or other decision-critical number, run fetch
-  on its source and confirm the value in the full text. Use the fetched full text, not the
-  evidence excerpt. If an official page URL that would answer the question already appears
-  in the evidence, fetch it instead of searching again. Follow-up searches are concurrency-safe;
-  use the new S-ids they print.
+    python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12
+    python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12 --grep "5.699" --grep "tarifa"
+    python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --url https://... --subq <QID>
+  If an official page URL that would answer the question already appears in the evidence,
+  fetch it instead of searching again. Follow-up searches are concurrency-safe; use the new
+  S-ids they print.
+
+  MANDATORY for every price, fee, tariff, deadline, requirement or decision-critical number:
+    (a) fetch the cited page with `--grep` for the value and confirm it in the full text.
+        `no matches` means the value is NOT on that page: fix the source or drop the claim.
+    (b) record the unit and pack size exactly as the page states it — per unit, per box of N,
+        per month, currency, incl./excl. tax — in the claim and in the `unit` field.
+    (c) run one freshness search for a newer or superseding version (e.g. "<thing> vigente",
+        "<thing> <current year>", the official issuer's site) and use the newest official
+        value, recording its `as_of` date. An older official PDF is not the current value.
+    (d) if the only source is tagged social/forum or low-authority, corroborate it with a
+        second independent source or set `confidence` to "low".
+  Prefer authority >= 3 and official/primary pages. A forum post, Q&A page, social media,
+  WeChat, LinkedIn or a blog never settles a price, requirement or deadline on its own.
 
   STEP 3 — Answer the subquestion. Use ONLY facts present in the evidence file or in pages
   you fetched. Cite with S-ids that appear in those outputs. If sources conflict, record the
@@ -239,14 +264,19 @@ context: |
    "question": "<QUESTION>",
    "answer_summary": "3-6 sentences answering the subquestion, each claim followed by its S-id citation",
    "findings": [{"claim": "one verifiable fact with a number/date/name", "source_ids": ["S3"],
-                 "confidence": "high", "verified": true, "date_status": "open"}],
+                 "confidence": "high", "verified": true, "date_status": "open",
+                 "as_of": "2026-11", "unit": "S/ per kWh, incl. IGV"}],
    "contradictions": ["source A says X [S4] while source B says Y [S9]"],
    "gaps": ["what could not be established and why"]}
 
   Rules for the JSON: 3-8 findings; source_ids are S-ids only, never URLs; confidence is
-  exactly "high", "medium" or "low"; verified is true only when the claim was confirmed in
-  fetched full text, false otherwise; date_status is required on date claims and is exactly
-  "open", "past" or "unknown" (omit it for non-date claims); contradictions and gaps are
+  exactly "high", "medium" or "low"; verified is true only when the claim was confirmed with
+  `fetch --grep` in the fetched full text, false otherwise; date_status is required on date
+  claims and is exactly "open", "past" or "unknown" (omit it for non-date claims); as_of is
+  required on every finding that carries a value (price, fee, quantity, rate, deadline) and is
+  "YYYY-MM", "YYYY-MM-DD" or "unknown" — the date the value is valid as of, from the page;
+  unit is required when the claim has a price or quantity and repeats the page's wording
+  ("S/ 14.90 per box of 12", "US$ 40 per month, excl. tax"); contradictions and gaps are
   arrays (may be empty). Validate it with:
     python3 -m json.tool <WORK>/findings/<QID>.json > /dev/null && echo ok
   Then reply with exactly that JSON object and no other prose.
@@ -264,7 +294,9 @@ output_schema: {
                      "source_ids": {"type": "array", "items": {"type": "string"}},
                      "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                      "verified": {"type": "boolean"},
-                     "date_status": {"type": "string", "enum": ["open", "past", "unknown"]}}}},
+                     "date_status": {"type": "string", "enum": ["open", "past", "unknown"]},
+                     "as_of": {"type": "string"},
+                     "unit": {"type": "string"}}}},
     "contradictions": {"type": "array", "items": {"type": "string"}},
     "gaps": {"type": "array", "items": {"type": "string"}}
   }
@@ -279,11 +311,33 @@ When results arrive (or when you resume):
 1. `python3 ${HERMES_SKILL_DIR}/scripts/research.py status --work <WORK>` (it prints
    `post_actions`; re-read plan.json so they survive the wake).
 2. Every subquestion listed under `findings:` as missing → research it YOURSELF, one at a
-   time: read its evidence file, optionally run up to 4 ad-hoc searches and fetch at least 2
-   and at most 4 pages, then write `<WORK>/findings/<qid>.json` in the same shape with the
-   write tool.
+   time: read its evidence file, optionally run up to 6 ad-hoc searches and fetch 3-8 pages,
+   then write `<WORK>/findings/<qid>.json` in the same shape with the write tool.
 3. If `delegate_task` is unavailable or errors: do all subquestions yourself, sequentially,
    same shape, same files.
+
+## Step 4b — Gap round
+
+Iterative deepening: run this once, after every findings file exists and before you
+synthesize. Do not skip it silently.
+
+1. Read all `<WORK>/findings/*.json` and list:
+   - gaps the researchers reported,
+   - contradictions between findings,
+   - decision-critical findings (prices, fees, tariffs, requirements, eligibility, deadlines)
+     with `verified: false` or `confidence: "low"`,
+   - asks in `plan.json` whose coverage is thin: no number where a number is needed, one weak
+     source, or only social/forum/low-authority support.
+2. Pick the top ≤8 items by how much they change the answer; skip cosmetic ones.
+3. For each item run at most 2 targeted calls YOURSELF:
+   `python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "..."`
+   and/or `fetch --work <WORK> --id S# --grep "value"` (or `fetch --url ... --subq <QID>`).
+4. Append the result to the relevant `<WORK>/findings/<qid>.json`: a new finding, or a
+   corrected one (fix `claim`, `source_ids`, `confidence`, `verified`, `as_of`, `unit`).
+   Keep the file valid JSON.
+5. If nothing qualifies, say "no gap round needed" and go on.
+
+Then synthesize from the updated findings.
 
 ## Step 5 — Synthesize
 
@@ -312,7 +366,8 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    - `## Assumptions` / `## Supuestos`: required whenever the report computes anything. A table
      with each input, value, unit and source id (or "assumption"/"supuesto" and why). Use ONE
      exchange rate, cited, everywhere; cost totals must list every component.
-   - `## Methodology` / `## Metodología`: real counts (subquestions, sources, queries) and today.
+   - `## Methodology` / `## Metodología`: real counts (subquestions, sources, queries), the
+     search spend the script printed, and today.
 5. Rules for every section: every factual paragraph has at least one `[S#]`; no uncited
    numbers; put the citation where the claim is, not only at the end. Prefer tables over
    prose: whenever you compare options, amounts, requirements, deadlines, steps or risks, put
@@ -320,7 +375,7 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    the cells) and keep the prose around it to 1-3 sentences that say what the table means.
    Do not pad: a typical report is 4,000-7,000 words. Do not leave HTML comments in the body. Do
    not add a References heading — `finalize` adds the localized one.
-6. Before finalizing, re-read the whole draft once and fix these four things:
+6. Before finalizing, re-read the whole draft once and fix these six things:
    - **Cite the right source.** A number or proper name next to `[S#]` must appear in S#'s
      text. If it came from another source, cite that one; if you cannot find it, move it to
      Not verified.
@@ -335,6 +390,14 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
      current affiliation, a price, a deadline, a requirement, availability) must come from a
      page you fetched in this run and that shows it is current. If not, fetch the current page
      (`fetch` costs almost nothing) or drop the step.
+   - **Units and pack sizes match the source.** If the page says "S/ 14.90 per box of 12", the
+     report says per box, not per unit; if it says "per month", do not present it as per year.
+     Never convert, divide or multiply without `≈` and a cited input. State the currency and
+     whether tax is included, exactly as the page does.
+   - **Every value in What to do has an as_of date and the newest official source.** Check
+     each value against its finding's `as_of`; if a newer official value exists (a newer
+     tariff, fee schedule, regulation or price list), use it everywhere the old one appeared
+     and note the "as of" date in the step.
 
 ## Step 6 — Finalize
 
@@ -365,6 +428,11 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
   move it to Not verified. Re-run finalize once; a few remaining warnings are acceptable.
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
   paragraphs (the report is still written; do not ignore this).
+- `warning: N Summary/What-to-do sentence(s)/cell(s) cite only social/forum or low-authority
+  sources` → the decision rests on weak support. Search for an official/primary source and
+  fetch it, then cite that; if none exists, mark the claim `confidence: "low"` and say so in
+  Disagreements or Not verified. Do not leave a price, requirement or deadline on a forum
+  post, Q&A page, social media, WeChat, LinkedIn or blog alone.
 
 ## Step 7 — Post-actions
 
@@ -417,9 +485,10 @@ skipped as duplicates), and `finalize` is repeatable.
 
 ## Failure handling
 
-- `DEEP_RESEARCH_EXA_KEY is not set` → tell the user to run
-  `hermes config set DEEP_RESEARCH_EXA_KEY <their Exa key>` and re-run. Do not fake results.
+- `DEEP_RESEARCH_DEEPSEEK_KEY is not set` → tell the user to run
+  `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <their key>` and re-run. Do not fake results.
 - `HTTP 401/403` → the key is invalid or exhausted. Report it; do not retry in a loop.
+- `HTTP 402` → insufficient DeepSeek balance; tell the user to top up. Do not retry.
 - `HTTP 429/5xx` → the script already retried 3 times with backoff. Re-run the same
   command once; if it still fails, tell the user which queries failed and continue with
   the sources already on disk.
@@ -428,8 +497,11 @@ skipped as duplicates), and `finalize` is repeatable.
 - `plan.json is invalid` → fix exactly the printed lines (asks, covers, identify/q1);
   `--dry-run` until clean.
 - `findings shape` warnings from `status` → add `verified` to every finding, `date_status`
-  on date claims, and real S-ids; rewrite that file.
-- Empty results → broaden wording, remove quotes/jargon, add a site: or year variant.
+  on date claims, `as_of`/`unit` on value claims, and real S-ids; rewrite that file.
+- `fetch --grep` prints `no matches for: ...` and exits 1 → the value is not on that page.
+  Do not cite it from that source; find the page that states it.
+- Empty results → broaden wording, remove quotes/jargon, add a `site:` or country-TLD
+  variant (do not add `after:` to official-document queries).
 - `delegate_task` error or no results message → do the subquestions yourself sequentially
   (step 4 fallback), then continue.
 - A post-action tool is missing or fails → do not stop; report that item as failed in the final
@@ -437,10 +509,12 @@ skipped as duplicates), and `finalize` is repeatable.
 
 ## Budget defaults
 
-- 4-8 subquestions, 3-5 queries each, 8 results per query, 6000 chars per source.
-- Per subquestion researcher: max 4 follow-up search calls (≤3 queries each) and fetch at
-  least 2, at most 4 pages.
-- Typical run: 20-40 searches in step 3 plus ≤32 follow-ups. The script prints run and
-  cumulative `cost` — include it in `## Methodology` if it is above $1.
-- Do not raise `--workers` above 10 (Exa rate limits) and do not raise results per query
-  above 10 (noise, not coverage).
+- 4-8 subquestions, 4-6 queries each (≤128 chars), 20 results per query (search is billed per
+  request, so 20 costs the same as 8), 6000 chars per source in `sources.json` plus the full
+  page cached in `pages/`.
+- Per subquestion researcher: max 6 follow-up search calls (≤3 queries each) and 3-8 fetched
+  pages. Cached pages cost nothing, so fetch aggressively.
+- Typical run: 24-48 searches in step 3 plus ≤48 follow-ups and ≤8 gap-round searches. At
+  $0.00075 per request that is about $0.10 per report. The script prints run and cumulative
+  `cost` — include it in `## Methodology` when it is above $0.10.
+- Do not raise `--workers` above 10 (provider rate limits).
