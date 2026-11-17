@@ -78,7 +78,7 @@ Outputs:
 
 ```
 ~/research/<slug>.md              final report, numbered linked citations + References
-~/research/.work/<slug>/          plan.json, sources.json, evidence/, findings/, draft.md
+~/research/.work/<slug>/          plan.json, sources.json, evidence/, findings/, pages/, draft.md
 ```
 
 The work dir is the resume state: if the agent or the gateway restarts, `status` shows exactly
@@ -118,6 +118,10 @@ python3 skills/deep-research/scripts/research.py status --work DIR
 reported and skipped so the run continues. Concurrent ad-hoc searches are safe: sources are
 merged under an exclusive `flock` with atomic replacement, so parallel researchers never
 duplicate ids or lose sources.
+
+`fetch` caches the returned text in `<work>/pages/<S#>.md`. Re-fetching a page is free: when
+the cache already covers the requested `--max-chars` (or the page came back complete), the
+script prints the cached text without calling Exa.
 
 `--num-results` defaults to 8, or to `DEEP_RESEARCH_NUM_RESULTS` when the flag is omitted.
 Each work dir also gets `log.jsonl`: one JSON line per `search_batch`, `search_adhoc`, `fetch`

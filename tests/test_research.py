@@ -25,15 +25,12 @@ SLUG = "2026-11-15-test-topic"
 # --------------------------------------------------------------------------
 
 def mock_fixture(tmp_path: Path, routes: list[dict], default: dict | None = None,
-                 default_contents: dict | None = None,
-                 default_serper: dict | None = None) -> Path:
+                 default_contents: dict | None = None) -> Path:
     fixture = {
         "routes": routes,
         "default": default or {"json": {"results": [], "costDollars": {"total": 0.0}}},
         "default_contents": default_contents or {"json": {"results": []}},
     }
-    if default_serper is not None:
-        fixture["default_serper"] = default_serper
     path = tmp_path / "mock.json"
     path.write_text(json.dumps(fixture), encoding="utf-8")
     return path
@@ -525,6 +522,7 @@ def test_exa_search_payload_uses_max_chars_and_highlights(monkeypatch):
     monkeypatch.setattr(research, "http_post_json", fake_post)
     research.exa_search("query", 5, 2000, "key")
     assert captured["numResults"] == 5
+    assert captured["type"] == "lite"
     assert captured["contents"]["text"]["maxCharacters"] == 2000
     assert captured["contents"]["highlights"] is True
 
@@ -650,6 +648,53 @@ def test_finalize_unknown_id_exits_1(tmp_path, capsys):
     assert "S99 on line 5" in err
     assert "S42 on line 7" in err
     assert not (tmp_path / "f.md").exists()
+
+
+def test_finalize_rejects_bare_source_ids(tmp_path, capsys):
+    work = make_work(tmp_path, plan_of(("q1", ["a"])))
+    write_registry(work, [
+        source("S1", "https://one.example/a"),
+        source("S3", "https://three.example/c"),
+        source("S7", "https://seven.example/g"),
+    ])
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n## Resumen\n\nClaim [S1].\n\n"
+        "| Item | Sources |\n| A | S3, S7 |\n\n"
+        "## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _out, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 1
+    assert "bare source ids" in err
+    assert "S3" in err and "S7" in err
+    assert "line 8" in err
+    assert not out.exists()
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["op"] == "finalize"
+    assert events[-1]["ok"] is False
+    assert "S3" in events[-1]["error"]
+
+
+def test_finalize_ignores_bare_tokens_that_are_not_known_ids(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n## Resumen\n\nS999 is not a registered id but [S1] is.\n\n"
+        "## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 0, err
+    assert out.exists()
+    assert "S999" in out.read_text(encoding="utf-8")
 
 
 def test_finalize_without_citations_exits_1(tmp_path, capsys):
@@ -951,27 +996,8 @@ def test_date_lint_ignores_lines_that_say_closed():
 
 
 # --------------------------------------------------------------------------
-# h. cheaper search modes (Exa type/site, Serper provider)
+# h. Exa search payload (type lite, site: rewrite)
 # --------------------------------------------------------------------------
-
-def serper_ok(items: list[dict], credits: int = 1) -> dict:
-    return {"status": 200, "json": {"organic": items, "credits": credits}}
-
-
-def organic(url: str, title: str = "Title", snippet: str = "A snippet.",
-            date: str | None = None) -> dict:
-    item = {"link": url, "title": title, "snippet": snippet}
-    if date:
-        item["date"] = date
-    return item
-
-
-def contents_ok(texts: dict[str, str], cost: float = 0.0) -> dict:
-    return {"json": {
-        "results": [{"url": url, "text": text} for url, text in texts.items()],
-        "costDollars": {"total": cost},
-    }}
-
 
 def capture_http(monkeypatch) -> list[dict]:
     calls: list[dict] = []
@@ -989,17 +1015,7 @@ def contents_calls(calls: list[dict]) -> list[list[str]]:
     return [call["payload"]["urls"] for call in calls if call["url"].endswith("/contents")]
 
 
-def use_serper(monkeypatch, fixture: Path) -> None:
-    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
-    monkeypatch.setenv(research.BACKOFF_ENV, "0")
-    monkeypatch.setenv(research.SEARCH_PROVIDER_ENV, "serper")
-    monkeypatch.setenv(research.SERPER_KEY_ENV, "test-serper-key")
-    monkeypatch.delenv(research.EXA_TYPE_ENV, raising=False)
-
-
 def test_exa_default_payload_uses_lite(monkeypatch):
-    monkeypatch.delenv(research.EXA_TYPE_ENV, raising=False)
-    monkeypatch.delenv(research.SEARCH_PROVIDER_ENV, raising=False)
     captured: dict = {}
 
     def fake_post(url, payload, api_key=None, timeout=45.0, headers=None):
@@ -1020,9 +1036,7 @@ def test_exa_default_payload_uses_lite(monkeypatch):
     assert captured["payload"]["query"] == "plain   query"
 
 
-def test_exa_type_env_and_site_tokens(monkeypatch):
-    monkeypatch.delenv(research.SEARCH_PROVIDER_ENV, raising=False)
-    monkeypatch.setenv(research.EXA_TYPE_ENV, "auto")
+def test_exa_payload_always_uses_lite_and_rewrites_site_tokens(monkeypatch):
     captured: dict = {}
 
     def fake_post(url, payload, api_key=None, timeout=45.0, headers=None):
@@ -1031,149 +1045,128 @@ def test_exa_type_env_and_site_tokens(monkeypatch):
 
     monkeypatch.setattr(research, "http_post_json", fake_post)
     research.exa_search("foo site:gob.pe bar site:edu.pe", 5, 2000, "key")
-    assert captured["type"] == "auto"
+    assert captured["type"] == "lite"
     assert captured["query"] == "foo bar"
     assert captured["includeDomains"] == ["gob.pe", "edu.pe"]
 
     captured.clear()
     research.exa_search("site:gob.pe site:edu.pe", 5, 2000, "key")
+    assert captured["type"] == "lite"
     assert captured["query"] == "site:gob.pe site:edu.pe"
     assert captured["includeDomains"] == ["gob.pe", "edu.pe"]
 
 
-def test_invalid_exa_type_exits_2(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
-    monkeypatch.delenv(research.SEARCH_PROVIDER_ENV, raising=False)
-    monkeypatch.setenv(research.EXA_TYPE_ENV, "bogus")
-    work = make_work(tmp_path, plan_of(("q1", ["a"])))
-    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
-    assert code == 2
-    assert research.EXA_TYPE_ENV in err
-
-
-def test_serper_batch_dedupes_urls_and_fetches_content(tmp_path, monkeypatch, capsys):
+def test_fetch_uses_page_cache_and_logs_zero_cost(tmp_path, monkeypatch, capsys):
+    page_text = "FULL PAGE " * 50
     fixture = mock_fixture(tmp_path, [
-        {"endpoint": "serper", "contains": "query one",
-         "responses": [serper_ok([
-             organic("https://shared.example/a", "Shared", "Shared snippet."),
-             organic("https://second.example/b", "Second", "Second snippet."),
-         ], credits=2)]},
-        {"endpoint": "serper", "contains": "query two",
-         "responses": [serper_ok([
-             organic("https://shared.example/a", "Shared", "Shared snippet."),
-             organic("https://third.example/c", "Third", "Third snippet."),
-         ], credits=2)]},
-    ], default_contents=contents_ok({
-        "https://shared.example/a": "Shared body.",
-        "https://second.example/b": "Second body.",
-        "https://third.example/c": "Third body.",
-    }, cost=0.003))
-    use_serper(monkeypatch, fixture)
+        {"endpoint": "contents", "contains": "one.example",
+         "responses": [{"status": 200, "json": {
+             "results": [{"url": "https://one.example/a", "title": "Fetched", "text": page_text}],
+             "costDollars": {"total": 0.001},
+         }}]},
+    ])
+    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
     calls = capture_http(monkeypatch)
-    work = make_work(tmp_path, plan_of(("q1", ["query one"]), ("q2", ["query two"])))
-
-    code, out, err = run_cli(["search", "--work", str(work)], capsys)
-    assert code == 0, err
-
-    registry = load_sources(work)
-    by_url = {src["url"]: src for src in registry["sources"]}
-    assert set(by_url) == {
-        "https://shared.example/a", "https://second.example/b", "https://third.example/c",
-    }
-    assert by_url["https://shared.example/a"]["highlights"] == ["Shared snippet."]
-    assert by_url["https://shared.example/a"]["text"] == "Shared body."
-    assert by_url["https://second.example/b"]["text"] == "Second body."
-    assert by_url["https://third.example/c"]["text"] == "Third body."
-
-    assert contents_calls(calls) == [[
-        "https://shared.example/a", "https://second.example/b", "https://third.example/c",
-    ]]
-    assert registry["cost_dollars"] == pytest.approx(0.007, abs=1e-9)
-    events = [json.loads(line) for line in
-              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
-    assert {event["op"] for event in events} == {"search_batch"}
-    assert {event["provider"] for event in events} == {"serper"}
-    assert sum(event["cost"] for event in events) == pytest.approx(0.007, abs=1e-9)
-
-
-def test_content_top_limits_and_disable_contents(tmp_path, monkeypatch, capsys):
-    texts = {f"https://r{i}.example/x": f"Body {i}." for i in range(1, 5)}
-    fixture = mock_fixture(tmp_path, [
-        {"endpoint": "serper", "contains": "four results",
-         "responses": [serper_ok([organic(f"https://r{i}.example/x") for i in range(1, 5)])]},
-    ], default_contents=contents_ok(texts, cost=0.002))
-    use_serper(monkeypatch, fixture)
-    calls = capture_http(monkeypatch)
-    work = make_work(tmp_path, plan_of(("q1", ["four results"])))
-
-    monkeypatch.setenv(research.CONTENT_TOP_ENV, "2")
-    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
-    assert code == 0, err
-    assert contents_calls(calls) == [["https://r1.example/x", "https://r2.example/x"]]
-    assert load_sources(work)["cost_dollars"] == pytest.approx(0.003, abs=1e-9)
-
-    calls.clear()
-    reset_query_index(work)
-    monkeypatch.setenv(research.CONTENT_TOP_ENV, "0")
-    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
-    assert code == 0, err
-    assert contents_calls(calls) == []
-    assert load_sources(work)["cost_dollars"] == pytest.approx(0.004, abs=1e-9)
-
-
-def test_adhoc_serper_does_not_refetch_existing_text(tmp_path, monkeypatch, capsys):
-    fixture = mock_fixture(tmp_path, [
-        {"endpoint": "serper", "contains": "follow up",
-         "responses": [serper_ok([
-             organic("https://shared.example/a", "Known", "Known snippet."),
-             organic("https://new.example/b", "New", "New snippet."),
-         ])]},
-    ], default_contents=contents_ok({
-        "https://shared.example/a": "Should not be fetched.",
-        "https://new.example/b": "New body.",
-    }, cost=0.001))
-    use_serper(monkeypatch, fixture)
-    calls = capture_http(monkeypatch)
-    work = make_work(tmp_path, plan_of(("q1", ["seed"])))
-    write_registry(work, [source("S1", "https://shared.example/a")])
+    work = make_work(tmp_path)
+    write_registry(work, [source("S1", "https://one.example/a")])
 
     code, out, err = run_cli(
-        ["search", "--work", str(work), "--subq", "q1", "--query", "follow up"], capsys
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "5000"], capsys
     )
     assert code == 0, err
-    assert contents_calls(calls) == [["https://new.example/b"]]
-    registry = load_sources(work)
-    known = next(src for src in registry["sources"] if src["url"] == "https://shared.example/a")
-    new = next(src for src in registry["sources"] if src["url"] == "https://new.example/b")
-    assert known["text"] == "Body text."
-    assert new["text"] == "New body."
-    assert new["highlights"] == ["New snippet."]
+    assert (work / "pages" / "S1.md").read_text(encoding="utf-8") == page_text
+    assert len(contents_calls(calls)) == 1
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["cached"] is False
+    assert events[-1]["cost"] == 0.001
+    assert load_sources(work)["cost_dollars"] == 0.001
+
+    # Same limit: the cached page was complete, so no new /contents call.
+    code, out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "5000"], capsys
+    )
+    assert code == 0, err
+    assert "FULL PAGE" in out
+    assert len(contents_calls(calls)) == 1
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["cached"] is True
+    assert events[-1]["cost"] == 0.0
+    assert load_sources(work)["cost_dollars"] == 0.001
+
+    # Smaller limit: still served from cache.
+    code, _out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "4000"], capsys
+    )
+    assert code == 0, err
+    assert len(contents_calls(calls)) == 1
 
 
-def test_serper_contents_failure_keeps_snippets(tmp_path, monkeypatch, capsys):
+def test_fetch_refetches_larger_limit_when_cache_was_truncated(tmp_path, monkeypatch, capsys):
+    first_text = "A" * 600
+    second_text = "B" * 1200
     fixture = mock_fixture(tmp_path, [
-        {"endpoint": "serper", "contains": "fragile",
-         "responses": [serper_ok([organic("https://broken.example/x", "Broken", "Only a snippet.")])]},
-        {"endpoint": "contents", "responses": [{"status": 500, "body": "boom"}]},
+        {"endpoint": "contents", "contains": "one.example",
+         "responses": [
+             {"status": 200, "json": {
+                 "results": [{"url": "https://one.example/a", "text": first_text}],
+                 "costDollars": {"total": 0.001},
+             }},
+             {"status": 200, "json": {
+                 "results": [{"url": "https://one.example/a", "text": second_text}],
+                 "costDollars": {"total": 0.002},
+             }},
+         ]},
     ])
-    use_serper(monkeypatch, fixture)
-    work = make_work(tmp_path, plan_of(("q1", ["fragile"])))
+    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
+    calls = capture_http(monkeypatch)
+    work = make_work(tmp_path)
+    write_registry(work, [source("S1", "https://one.example/a")])
 
-    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
-    assert code == 0
-    assert "contents fetch failed" in err
-    registry = load_sources(work)
-    assert len(registry["sources"]) == 1
-    src = registry["sources"][0]
-    assert src["highlights"] == ["Only a snippet."]
-    assert src["text"] == ""
+    code, _out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "600"], capsys
+    )
+    assert code == 0, err
+    assert (work / "pages" / "S1.md").read_text(encoding="utf-8") == first_text
+
+    code, out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "1200"], capsys
+    )
+    assert code == 0, err
+    assert second_text in out
+    assert len(contents_calls(calls)) == 2
+    assert (work / "pages" / "S1.md").read_text(encoding="utf-8") == second_text
+    assert load_sources(work)["cost_dollars"] == pytest.approx(0.003, abs=1e-9)
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["cached"] is False
 
 
-def test_serper_without_key_exits_2(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
-    monkeypatch.setenv(research.SEARCH_PROVIDER_ENV, "serper")
-    monkeypatch.delenv(research.SERPER_KEY_ENV, raising=False)
-    work = make_work(tmp_path, plan_of(("q1", ["a"])))
-    code, _out, err = run_cli(["search", "--work", str(work)], capsys)
-    assert code == 2
-    assert research.SERPER_KEY_ENV in err
+def test_fetch_larger_limit_hits_complete_cached_page(tmp_path, monkeypatch, capsys):
+    page_text = "SHORT PAGE"
+    fixture = mock_fixture(tmp_path, [
+        {"endpoint": "contents", "contains": "one.example",
+         "responses": [{"status": 200, "json": {
+             "results": [{"url": "https://one.example/a", "text": page_text}],
+             "costDollars": {"total": 0.001},
+         }}]},
+    ])
+    monkeypatch.setenv(research.MOCK_ENV, str(fixture))
+    calls = capture_http(monkeypatch)
+    work = make_work(tmp_path)
+    write_registry(work, [source("S1", "https://one.example/a")])
+
+    code, _out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "600"], capsys
+    )
+    assert code == 0, err
+    code, out, err = run_cli(
+        ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "1200"], capsys
+    )
+    assert code == 0, err
+    assert page_text in out
+    assert len(contents_calls(calls)) == 1
+
+
+

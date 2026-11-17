@@ -1008,6 +1008,40 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 1 if ok == 0 and effective_pairs else 0
 
 
+PAGES_DIR = "pages"
+
+
+def _page_cache_paths(work: Path, sid: str) -> tuple[Path, Path]:
+    base = work / PAGES_DIR
+    return base / f"{sid}.md", base / f"{sid}.json"
+
+
+def _cached_page(work: Path, sid: str, max_chars: int) -> str | None:
+    """Return cached text usable for *max_chars*, or None when Exa must be called."""
+    text_path, meta_path = _page_cache_paths(work, sid)
+    if not text_path.is_file():
+        return None
+    try:
+        text = text_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if len(text) >= max_chars:
+        return text[:max_chars]
+    try:
+        limit = int(json.loads(meta_path.read_text(encoding="utf-8")).get("max_chars"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    # A page shorter than its fetch limit came back complete.
+    return text if len(text) < limit else None
+
+
+def _store_page(work: Path, sid: str, text: str, max_chars: int) -> None:
+    text_path, meta_path = _page_cache_paths(work, sid)
+    text_path.parent.mkdir(parents=True, exist_ok=True)
+    write_text_atomic(text_path, text)
+    write_json_atomic(meta_path, {"max_chars": max_chars})
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     work = require_work(args.work)
     sid = args.id.strip()
@@ -1017,20 +1051,30 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     src = source_by_id(registry, sid)
     if src is None:
         die(f"error: unknown source id {sid} in {work / 'sources.json'}", 1)
-    api_key = exa_key_required()
     max_chars = max(500, int(args.max_chars))
-    note(f"fetching {sid}: {src['url']}")
-    try:
-        page, cost = with_retries(
-            lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}"
-        )
-    except HttpError as exc:
-        append_log(work, {
-            "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-            "fetched_id": sid, "cost": None, "ok": False, "error": str(exc),
-        })
-        raise
-    text = str(page.get("text") or "")
+    cached = _cached_page(work, sid, max_chars)
+    if cached is not None:
+        text = cached
+        cost = 0.0
+        title = src.get("title") or ""
+        note(f"using cached page for {sid}")
+    else:
+        api_key = exa_key_required()
+        note(f"fetching {sid}: {src['url']}")
+        try:
+            page, cost = with_retries(
+                lambda: exa_contents(src["url"], max_chars, api_key), 3, f"contents {sid}"
+            )
+        except HttpError as exc:
+            append_log(work, {
+                "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+                "fetched_id": sid, "cached": False, "cost": None, "ok": False, "error": str(exc),
+            })
+            raise
+        text = str(page.get("text") or "")
+        title = page.get("title") or src.get("title") or ""
+        if text:
+            _store_page(work, sid, text, max_chars)
     with sources_lock(work):
         registry = load_registry(work / "sources.json", slug_from_work(work))
         stored = source_by_id(registry, sid)
@@ -1044,9 +1088,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         write_json_atomic(work / "sources.json", registry)
     append_log(work, {
         "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-        "fetched_id": sid, "cost": round(cost, 6), "ok": True, "error": None,
+        "fetched_id": sid, "cached": cached is not None, "cost": round(cost, 6),
+        "ok": True, "error": None,
     })
-    print(f"[{sid}] {page.get('title') or src.get('title') or ''} — {src['url']}")
+    print(f"[{sid}] {title} — {src['url']}")
     print(text or "(no text returned by /contents)")
     return 0
 

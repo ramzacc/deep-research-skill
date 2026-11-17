@@ -220,6 +220,7 @@ context: |
     python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "your query"
     (repeat --query up to 3 times per call)
     python3 ${HERMES_SKILL_DIR}/scripts/research.py fetch --work <WORK> --id S12 --max-chars 20000
+  Re-fetching a page is free: the fetched text is cached in `<WORK>/pages/<S#>.md`.
   For every price, deadline, eligibility rule or other decision-critical number, run fetch
   on its source and confirm the value in the full text. Use the fetched full text, not the
   evidence excerpt. If an official page URL that would answer the question already appears
