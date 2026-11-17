@@ -85,7 +85,8 @@ text per query at runtime.
 
 Configs may also carry an `env` dict that `run.py` applies to the run:
 
-- **G** sets `DEEP_RESEARCH_EXA_TYPE=lite` (cheaper Exa `/search` type).
+- **B** pins `DEEP_RESEARCH_EXA_TYPE=auto` (the default before `lite`), so earlier B results stay comparable.
+- **G** sets `DEEP_RESEARCH_EXA_TYPE=lite` (cheaper Exa `/search` type; now the shipped default).
 - **H** sets `DEEP_RESEARCH_SEARCH_PROVIDER=serper` and
   `DEEP_RESEARCH_CONTENT_TOP=5`, and its variant `SKILL.md` additionally declares
   `DEEP_RESEARCH_SERPER_KEY` so Hermes registers it for the terminal sandbox.

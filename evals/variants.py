@@ -118,6 +118,7 @@ CONFIGS: dict[str, dict] = {
         "subquestions": {"min": 4, "max": 8, "target": 6},
         "num_results": 8,
         "delegate": True,
+        "env": {"DEEP_RESEARCH_EXA_TYPE": "auto"},
     },
     "C": {
         "description": "wide + deep: 8 subquestions, 10 results/query, delegation",
