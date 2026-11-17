@@ -43,7 +43,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
@@ -59,6 +59,7 @@ IDENTIFY_Q1_RE = re.compile(
 )
 CITE_RE = re.compile(r"\[(S[0-9]+(?:\s*,\s*S[0-9]+)*)\]")
 CITE_LINK_RE = re.compile(r"\[\[[0-9]+\]\]\(")
+BARE_ID_RE = re.compile(r"\bS[0-9]+\b")
 MAX_PARAGRAPH_CITATION_WARN = 0.60
 
 # Test-only knobs (documented in README.md). Never set these in production.
@@ -344,6 +345,16 @@ def default_max_chars() -> int:
         note(f"warning: {MAX_CHARS_ENV}={value} is below 1; using {DEFAULT_MAX_CHARS}")
         return DEFAULT_MAX_CHARS
     return value
+
+
+def parse_today_arg(value: str | None) -> date:
+    """--today YYYY-MM-DD (default: the system date)."""
+    if not value:
+        return today_date()
+    try:
+        return date.fromisoformat(str(value).strip())
+    except ValueError:
+        die(f"error: --today must be YYYY-MM-DD (got {value!r})", 2)
 
 
 def deepseek_key_required() -> str:
@@ -861,20 +872,94 @@ def _sid_num(sid) -> int:
     return int(digits) if digits else 0
 
 
-def _rank_value(src: dict) -> tuple[float, int, str]:
+def today_date() -> "date":
+    return datetime.now().date()
+
+
+def parse_iso_date(value) -> "date | None":
+    """Parse a registry `published` value (ISO timestamp, date or YYYY-MM)."""
+    text = str(value or "").strip()
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
+    if match:
+        try:
+            return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return None
+    match = re.match(r"^(\d{4})-(\d{2})$", text)
+    if match:
+        try:
+            return date(int(match.group(1)), int(match.group(2)), 1)
+        except ValueError:
+            return None
+    return None
+
+
+YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+
+
+def year_hint(url: str, title: str, current_year: int) -> int | None:
+    """Newest plausible year in a URL or title, ignoring years inside digit runs."""
+    years = [
+        int(match.group(1))
+        for match in YEAR_RE.finditer(f"{url or ''} {title or ''}")
+        if 1990 <= int(match.group(1)) <= current_year
+    ]
+    return max(years) if years else None
+
+
+def _years_before(today: "date", years: int) -> "date":
+    try:
+        return today.replace(year=today.year - years)
+    except ValueError:
+        return today.replace(year=today.year - years, day=28)
+
+
+def recency_bonus(src: dict, today: "date | None" = None) -> float:
+    """Ranking nudge for freshness: new values usually live in recent pages."""
+    today = today or today_date()
+    when = parse_iso_date(src.get("published"))
+    if when is not None:
+        age_days = max(0, (today - when).days)
+        if age_days <= 90:
+            return 0.6
+        if age_days <= 365:
+            return 0.3
+        if when < _years_before(today, 2):
+            return -0.4
+        return 0.0
+    hint = year_hint(src.get("url", ""), src.get("title", ""), today.year)
+    if hint is None:
+        return 0.0
+    if hint == today.year:
+        return 0.4
+    if hint == today.year - 1:
+        return 0.1
+    if hint <= today.year - 3:
+        return -0.5
+    return 0.0
+
+
+def source_score(src: dict, today: "date | None" = None) -> float:
+    """Combined evidence score: DeepSeek rerank plus the recency bonus."""
     rerank = src.get("rerank")
+    base = float(rerank) if _is_number(rerank) else 0.0
+    return round(base + recency_bonus(src, today), 6)
+
+
+def _rank_value(src: dict, today: "date | None") -> tuple[float, int, str]:
     authority = src.get("authority")
     return (
-        float(rerank) if _is_number(rerank) else -1.0,
+        source_score(src, today),
         int(authority) if isinstance(authority, int) and not isinstance(authority, bool) else -1,
-        str(src.get("published") or ""),
+        format_date(src.get("published")),
     )
 
 
-def rank_sources(sources: list[dict]) -> list[dict]:
-    """Order by best rerank, then authority, then newest; stable on S-id."""
+def rank_sources(sources: list[dict], today: "date | None" = None) -> list[dict]:
+    """Order by combined rerank+recency score, then authority, then newest; stable on S-id."""
+    today = today or today_date()
     ordered = sorted(sources, key=lambda src: _sid_num(src.get("id")))
-    return sorted(ordered, key=_rank_value, reverse=True)
+    return sorted(ordered, key=lambda src: _rank_value(src, today), reverse=True)
 
 
 def is_social_host(url: str) -> bool:
@@ -882,7 +967,17 @@ def is_social_host(url: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in SOCIAL_HOSTS)
 
 
-def source_quality_tags(src: dict) -> list[str]:
+def is_possibly_outdated(src: dict, today: "date | None" = None) -> bool:
+    """True when the date or year hint is two or more years old."""
+    today = today or today_date()
+    when = parse_iso_date(src.get("published"))
+    if when is not None:
+        return when <= _years_before(today, 2)
+    hint = year_hint(src.get("url", ""), src.get("title", ""), today.year)
+    return hint is not None and today.year - hint >= 2
+
+
+def source_quality_tags(src: dict, today: "date | None" = None) -> list[str]:
     """Digest tags that warn about source quality. They never filter a source out."""
     tags: list[str] = []
     authority = src.get("authority")
@@ -890,6 +985,8 @@ def source_quality_tags(src: dict) -> list[str]:
         tags.append("low-authority")
     if is_social_host(src.get("url", "")):
         tags.append("social/forum")
+    if is_possibly_outdated(src, today):
+        tags.append("possibly-outdated")
     return tags
 
 
@@ -901,8 +998,17 @@ def format_date(value) -> str:
     return match.group(1) if match else text[:24]
 
 
-def _source_header(src: dict) -> str:
-    when = format_date(src.get("published")) or "undated"
+def _when_label(src: dict, today: "date | None" = None) -> str:
+    day = format_date(src.get("published"))
+    if day:
+        return day
+    today = today or today_date()
+    hint = year_hint(src.get("url", ""), src.get("title", ""), today.year)
+    return f"undated (year hint {hint})" if hint else "undated"
+
+
+def _source_header(src: dict, today: "date | None" = None) -> str:
+    when = _when_label(src, today)
     header = f"### [{src['id']}] {src.get('title') or '(untitled)'} ({when}) — {src.get('url')}"
     authority = src.get("authority")
     if isinstance(authority, int) and not isinstance(authority, bool):
@@ -910,15 +1016,16 @@ def _source_header(src: dict) -> str:
     rerank = src.get("rerank")
     if _is_number(rerank):
         header += f" · rerank {rerank:g}"
-    tags = source_quality_tags(src)
+    tags = source_quality_tags(src, today)
     if tags:
         header += " · " + " · ".join(tags)
     return header
 
 
 def source_section(work: Path, src: dict, question: str,
-                   max_text_chars: int = PASSAGE_CHARS) -> str:
-    lines = [_source_header(src)]
+                   max_text_chars: int = PASSAGE_CHARS,
+                   today: "date | None" = None) -> str:
+    lines = [_source_header(src, today)]
     summary = " ".join(str(src.get("summary") or "").split())
     if summary:
         lines.append(f"- {summary}")
@@ -929,54 +1036,57 @@ def source_section(work: Path, src: dict, question: str,
     return "\n".join(lines)
 
 
-def source_one_liner(src: dict) -> str:
+def source_one_liner(src: dict, today: "date | None" = None) -> str:
     authority = src.get("authority")
     if not isinstance(authority, int) or isinstance(authority, bool):
         authority_text = "authority unknown"
     else:
         authority_text = f"authority {authority}"
-    when = format_date(src.get("published")) or "undated"
     line = (
         f"[{src['id']}] {src.get('title') or '(untitled)'} — {src.get('url')} · "
-        f"{authority_text} · {when}"
+        f"{authority_text} · {_when_label(src, today)}"
     )
-    tags = source_quality_tags(src)
+    tags = source_quality_tags(src, today)
     if tags:
         line += " · " + " · ".join(tags)
     return line
 
 
-def render_evidence(qid: str, question: str, sources: list[dict], work: Path) -> str:
+def render_evidence(qid: str, question: str, sources: list[dict], work: Path,
+                    today: "date | None" = None) -> str:
+    today = today or today_date()
     lines = [f"# {qid} — {question}", ""]
     if not sources:
         lines += ["No sources collected for this subquestion yet.", ""]
         return "\n".join(lines)
-    ranked = rank_sources(sources)
+    ranked = rank_sources(sources, today)
     full = ranked[:DIGEST_FULL_LIMIT]
     rest = ranked[DIGEST_FULL_LIMIT:]
     lines += [
         f"{len(sources)} candidate sources. Cite them as [S#]; ids are stable.",
-        f"Full sections for the top {len(full)} (best rerank/authority/date); the rest are "
-        "one-liners you can still fetch with `fetch --id S#`.",
+        f"Full sections for the top {len(full)} (best rerank+recency, authority, date); the "
+        "rest are one-liners you can still fetch with `fetch --id S#` and find with "
+        "`recent --grep`.",
         "",
     ]
     for src in full:
-        lines.append(source_section(work, src, question))
+        lines.append(source_section(work, src, question, PASSAGE_CHARS, today))
     if rest:
         lines += ["## Other candidates", ""]
-        lines += [source_one_liner(src) for src in rest]
+        lines += [source_one_liner(src, today) for src in rest]
         lines.append("")
     return "\n".join(lines)
 
 
 def append_evidence(path: Path, qid: str, question: str, sources: list[dict],
-                    work: Path) -> list[dict]:
+                    work: Path, today: "date | None" = None) -> list[dict]:
     """Append source sections not already present. Returns the sources appended."""
+    today = today or today_date()
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    fresh = [src for src in rank_sources(sources) if f"### [{src['id']}]" not in existing]
+    fresh = [src for src in rank_sources(sources, today) if f"### [{src['id']}]" not in existing]
     if not fresh:
         return []
-    chunk = "\n".join(source_section(work, src, question) for src in fresh)
+    chunk = "\n".join(source_section(work, src, question, PASSAGE_CHARS, today) for src in fresh)
     if existing.strip():
         with path.open("a", encoding="utf-8") as handle:
             handle.write("\n## Added by follow-up searches\n\n" + chunk)
@@ -1169,6 +1279,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         args.num_results = default_num_results()
     if getattr(args, "max_chars", None) is None:
         args.max_chars = default_max_chars()
+    today = parse_today_arg(getattr(args, "today", None))
     plan: dict = {}
     plan_path = work / "plan.json"
     adhoc = bool(args.subq)
@@ -1295,7 +1406,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             with sources_lock(work):
                 registry = load_registry(work / "sources.json", slug)
                 written = [src["id"] for src in append_evidence(
-                    work / "evidence" / f"{qid}.md", qid, question, picked, work
+                    work / "evidence" / f"{qid}.md", qid, question, picked, work, today
                 )]
             if written:
                 print(f"\nevidence appended for {', '.join(written)}: {work / 'evidence' / (qid + '.md')}")
@@ -1314,7 +1425,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         per_q[qid] = len(picked)
         write_text_atomic(
             work / "evidence" / f"{qid}.md",
-            render_evidence(qid, str(item.get("question") or ""), picked, work) + "\n",
+            render_evidence(qid, str(item.get("question") or ""), picked, work, today) + "\n",
         )
     ok = len(effective_pairs) - failures
     skipped_note = f", {len(skipped)} skipped duplicate(s)" if skipped else ""
@@ -1487,6 +1598,81 @@ def _subquestion_text(work: Path, qid: str) -> str:
     return ""
 
 
+def recent_matches(work: Path, sources: list[dict], terms: list[str]) -> list[dict]:
+    """Sources whose title, summary or cached page contain every term."""
+    folded_terms = [folded for folded in (fold(term) for term in terms) if folded]
+    if not folded_terms:
+        return []
+    matches: list[dict] = []
+    for src in sources:
+        haystack = fold(" ".join([
+            str(src.get("title") or ""),
+            str(src.get("summary") or ""),
+            read_page(work, src.get("id", "")) or str(src.get("text") or ""),
+        ]))
+        if all(term in haystack for term in folded_terms):
+            matches.append(src)
+    return matches
+
+
+def _recent_sort_date(src: dict, today: "date") -> str:
+    when = parse_iso_date(src.get("published"))
+    if when is not None:
+        return when.isoformat()
+    hint = year_hint(src.get("url", ""), src.get("title", ""), today.year)
+    return f"{hint}-01-01" if hint else ""
+
+
+def sort_recent(sources: list[dict], today: "date | None" = None) -> list[dict]:
+    """Newest first by date or year hint; undated without a hint last."""
+    today = today or today_date()
+    ordered = sorted(sources, key=lambda src: _sid_num(src.get("id")))
+    return sorted(
+        ordered,
+        key=lambda src: (_recent_sort_date(src, today), _rank_value(src, today)[1]),
+        reverse=True,
+    )
+
+
+def recent_line(src: dict, today: "date | None" = None) -> str:
+    today = today or today_date()
+    day = format_date(src.get("published"))
+    if day:
+        when = day
+    else:
+        hint = year_hint(src.get("url", ""), src.get("title", ""), today.year)
+        when = f"year hint {hint}" if hint else "undated"
+    authority = src.get("authority")
+    if not isinstance(authority, int) or isinstance(authority, bool):
+        authority_text = "authority unknown"
+    else:
+        authority_text = f"authority {authority}"
+    return (
+        f"[{src['id']}] {when} · {authority_text} · "
+        f"{src.get('title') or '(untitled)'} — {src.get('url')}"
+    )
+
+
+def cmd_recent(args: argparse.Namespace) -> int:
+    work = require_work(args.work)
+    terms = [term.strip() for term in args.grep if term.strip()]
+    if not terms:
+        die("error: --grep needs at least one non-empty term", 2)
+    registry = load_registry(work / "sources.json", slug_from_work(work))
+    today = today_date()
+    matches = sort_recent(recent_matches(work, registry["sources"], terms), today)
+    limit = max(1, int(args.limit))
+    print(f"matched: {len(matches)} source(s) for: {', '.join(terms)} (newest first)")
+    for src in matches[:limit]:
+        print(recent_line(src, today))
+    if len(matches) > limit:
+        print(f"... {len(matches) - limit} more (raise --limit)")
+    if not matches:
+        print("no registered source matches all terms; run search --subq <QID> --query \"...\" "
+              "to find newer sources")
+    return 0
+
+
 def detect_language(text: str) -> str:
     """Best-effort stopword ratio; defaults to English for short/ambiguous text."""
     words = re.findall(r"[a-záéíóúüñ]+", text.lower())
@@ -1537,8 +1723,7 @@ DEADLINE_RE = re.compile(
 )
 
 
-def _dates_in_line(line: str) -> list[tuple["date", int, int]]:
-    from datetime import date
+def _dates_in_line(line: str) -> list[tuple[date, int, int]]:
     found: list[tuple[date, int, int]] = []
     for match in re.finditer(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", line):
         try:
@@ -1675,6 +1860,18 @@ def _citation_support_warnings(text: str, by_id: dict) -> list[str]:
     return warnings
 
 
+def _bare_source_ids(text: str, by_id: dict) -> list[tuple[str, int]]:
+    """Existing S-ids written outside a citation bracket, with their line numbers."""
+    found: list[tuple[str, int]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        cleaned = CITE_RE.sub(" ", line)
+        for match in BARE_ID_RE.finditer(cleaned):
+            sid = match.group(0)
+            if sid in by_id:
+                found.append((sid, lineno))
+    return found
+
+
 def _weak_source_warnings(text: str, by_id: dict) -> list[str]:
     """Summary/What-to-do sentences whose only citations are weak sources."""
     problems = []
@@ -1772,6 +1969,26 @@ def cmd_finalize(args: argparse.Namespace) -> int:
             "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
             "fetched_id": None, "cost": None, "ok": False,
             "error": "unknown source ids: " + ", ".join(sorted({sid for sid, _ in unknown})),
+            "report": str(out_path),
+        })
+        return 1
+
+    bare = _bare_source_ids(text, by_id)
+    if bare:
+        by_line: dict[int, list[str]] = {}
+        for sid, lineno in bare:
+            by_line.setdefault(lineno, []).append(sid)
+        note("error: the draft mentions source ids outside a citation bracket "
+             "(they are not linked or counted):")
+        for lineno in sorted(by_line):
+            ids = sorted(set(by_line[lineno]), key=_sid_num)
+            note(f"  line {lineno}: {', '.join(ids)}")
+        note("Cite each as [S#] (for example [S476]) or drop the text. "
+             "Sources appear only as citation brackets.")
+        append_log(work, {
+            "op": "finalize", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
+            "fetched_id": None, "cost": None, "ok": False,
+            "error": "bare source ids: " + ", ".join(sorted({sid for sid, _ in bare}, key=_sid_num)),
             "report": str(out_path),
         })
         return 1
@@ -2022,6 +2239,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  research.py search --work ~/research/.work/2026-11-15-topic\n"
             "  research.py search --work DIR --subq q3 --query 'follow-up query'\n"
             "  research.py fetch --work DIR --id S12 --grep 'tariff'\n"
+            "  research.py recent --work DIR --grep tariff kWh\n"
             "  research.py finalize --work DIR --draft DIR/draft.md --out ~/research/topic.md\n"
             "  research.py status --work DIR\n"
         ),
@@ -2045,6 +2263,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help=f"results per query (default ${NUM_RESULTS_ENV} or {DEFAULT_NUM_RESULTS})")
     p_search.add_argument("--max-chars", type=int, default=None,
                           help=f"page text kept per source in sources.json (default ${MAX_CHARS_ENV} or {DEFAULT_MAX_CHARS})")
+    p_search.add_argument("--today", default=None,
+                          help="YYYY-MM-DD used for the recency ranking (default: system date)")
     p_search.add_argument("--dry-run", action="store_true", help="validate plan.json and print the query count; no API calls")
     p_search.set_defaults(func=cmd_search)
 
@@ -2059,6 +2279,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_fetch.add_argument("--grep", action="append", metavar="TERM",
                          help="print ±400-char windows around each match (repeatable)")
     p_fetch.set_defaults(func=cmd_fetch)
+
+    p_recent = sub.add_parser("recent", help="list matching sources newest first (no network)")
+    p_recent.add_argument("--work", required=True, help="work dir (from init)")
+    p_recent.add_argument("--grep", nargs="+", required=True, metavar="TERM",
+                          help="terms that must all appear in the title, summary or cached page")
+    p_recent.add_argument("--limit", type=int, default=15, help="rows to print (default 15)")
+    p_recent.set_defaults(func=cmd_recent)
 
     p_final = sub.add_parser("finalize", help="validate citations, renumber, add References")
     p_final.add_argument("--work", required=True, help="work dir (from init)")

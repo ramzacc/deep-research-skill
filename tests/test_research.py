@@ -1367,3 +1367,170 @@ def test_date_lint_ignores_lines_that_say_closed():
     still_open = "Plazo de inscripción: 10/11/2020 [S1]."
     assert research._date_warnings(past) == []
     assert research._date_warnings(still_open)
+
+
+# --------------------------------------------------------------------------
+# l. recency-aware ranking
+# --------------------------------------------------------------------------
+
+TODAY = __import__("datetime").date(2026, 11, 16)
+
+
+def test_recency_bonus_boundaries():
+    assert research.recency_bonus({"published": "2026-09-01"}, TODAY) == 0.6   # 76 days
+    assert research.recency_bonus({"published": "2026-01-01"}, TODAY) == 0.3   # 319 days
+    assert research.recency_bonus({"published": "2025-11-16"}, TODAY) == 0.3   # 365 days
+    assert research.recency_bonus({"published": "2025-11-15"}, TODAY) == 0.0   # 366 days
+    assert research.recency_bonus({"published": "2024-11-15"}, TODAY) == -0.4  # > 2 years
+    assert research.recency_bonus({"url": "https://x.pe/2026/11/a"}, TODAY) == 0.4
+    assert research.recency_bonus({"title": "Tarifa 2025"}, TODAY) == 0.1
+    assert research.recency_bonus({"title": "Tarifa 2024"}, TODAY) == 0.0
+    assert research.recency_bonus({"title": "Tarifa 2023"}, TODAY) == -0.5
+    assert research.recency_bonus({"title": "Sin fecha"}, TODAY) == 0.0
+
+
+def test_year_hint_extraction():
+    assert research.year_hint("https://x.pe/uploads/2021/05/tarifa.pdf", "", 2026) == 2021
+    assert research.year_hint("https://x.pe/item/1232021456/report", "", 2026) is None
+    assert research.year_hint("https://x.pe/a", "Tarifa 2019", 2026) == 2019
+    assert research.year_hint("https://x.pe/2019/a", "Resumen 2021", 2026) == 2021
+    assert research.year_hint("https://x.pe/2028/a", "", 2026) is None
+    assert research.year_hint("https://x.pe/1989/a", "", 2026) is None
+    assert research.year_hint("https://x.pe/a", "no year here", 2026) is None
+
+
+def test_fresh_news_outranks_stale_high_rerank_pdf(tmp_path):
+    work = make_work(tmp_path)
+    stale = source("S1", "https://sunat.gob.pe/uploads/2021/tarifa.pdf",
+                   "Tarifa electrica 2021", published="", authority=4, rerank=2.07)
+    news = source("S2", "https://elcomercio.pe/economia/nueva-tarifa", "Nueva tarifa electrica",
+                  published="2026-11-06", authority=2, rerank=1.35)
+    evidence = research.render_evidence("q1", "Question q1?", [stale, news], work, TODAY)
+    headers = re.findall(r"^### \[(S\d+)\]", evidence, re.MULTILINE)
+    assert headers == ["S2", "S1"]
+    assert "undated (year hint 2021)" in evidence
+    assert "possibly-outdated" in evidence
+    assert research.source_score(news, TODAY) > research.source_score(stale, TODAY)
+
+
+def test_possibly_outdated_tag_rules():
+    assert "possibly-outdated" in research.source_quality_tags(
+        {"url": "https://x.pe/a", "published": "2021-05-01"}, TODAY)
+    assert "possibly-outdated" in research.source_quality_tags(
+        {"url": "https://x.pe/2021/tarifa.pdf"}, TODAY)
+    assert "possibly-outdated" not in research.source_quality_tags(
+        {"url": "https://x.pe/2026/11/tarifa", "published": "2026-11-02"}, TODAY)
+    assert "possibly-outdated" not in research.source_quality_tags(
+        {"url": "https://x.pe/sin-fecha", "title": "Tarifa"}, TODAY)
+
+
+def test_search_accepts_today_and_rejects_bad_dates(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+    work = make_work(tmp_path, plan_of(("q1", ["a"])))
+    code, out, _err = run_cli(
+        ["search", "--work", str(work), "--today", "2026-11-16", "--dry-run"], capsys
+    )
+    assert code == 0
+    assert "plan ok: 1 subquestions, 1 queries" in out
+    code, _out, err = run_cli(
+        ["search", "--work", str(work), "--today", "16/11/2026", "--dry-run"], capsys
+    )
+    assert code == 2
+    assert "--today must be YYYY-MM-DD" in err
+
+
+# --------------------------------------------------------------------------
+# m. recent --grep (no network)
+# --------------------------------------------------------------------------
+
+def test_recent_filters_all_terms_and_sorts_newest_first(tmp_path, monkeypatch, capsys):
+    work = make_work(tmp_path)
+    write_registry(work, [
+        source("S1", "https://news.pe/nueva-tarifa", "Nueva tarifa electrica",
+               published="2026-11-02", authority=4,
+               summary="Nueva tarifa electrica residencial.", text="La tarifa sube a S/ 0.72."),
+        source("S2", "https://old.pe/uploads/2021/tarifa.pdf", "Tarifa electrica 2021",
+               published="", authority=3,
+               summary="Tarifa electrica anterior.", text="Tarifa antigua: S/ 0.60."),
+        source("S3", "https://sports.pe/nota", "Partido de futbol", published="2026-11-10",
+               authority=2, summary="Deportes", text="Nada de tarifas aqui."),
+        source("S4", "https://blog.pe/post", "Nota sin fecha", published="", authority=2,
+               summary="Sin fecha", text="Comentario sobre la tarifa electrica."),
+    ])
+    monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("recent must never hit the network")
+
+    monkeypatch.setattr(research, "http_post_json", explode)
+    code, out, err = run_cli(
+        ["recent", "--work", str(work), "--grep", "tarifa", "electrica"], capsys
+    )
+    assert code == 0, err
+    lines = [line for line in out.splitlines() if line.startswith("[S")]
+    assert [line.split("]")[0] + "]" for line in lines] == ["[S1]", "[S2]", "[S4]"]
+    assert "2026-11-02 · authority 4 · Nueva tarifa electrica" in lines[0]
+    assert "year hint 2021 · authority 3 · Tarifa electrica 2021" in lines[1]
+    assert "undated · authority 2 · Nota sin fecha" in lines[2]
+    assert "matched: 3 source(s) for: tarifa, electrica (newest first)" in out
+
+    code, out, _err = run_cli(
+        ["recent", "--work", str(work), "--grep", "tarifa", "electrica", "--limit", "1"],
+        capsys,
+    )
+    assert code == 0
+    assert out.count("[S") == 1
+    assert "... 2 more (raise --limit)" in out
+
+    code, out, _err = run_cli(["recent", "--work", str(work), "--grep", "hidrogeno"], capsys)
+    assert code == 0
+    assert "matched: 0 source(s)" in out
+    assert "run search --subq" in out
+
+
+# --------------------------------------------------------------------------
+# n. finalize rejects bare source ids
+# --------------------------------------------------------------------------
+
+def test_finalize_rejects_bare_source_ids_in_a_table(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n"
+        "| Local | S1, S2 |\n"
+        "| Import | S3 |\n\n"
+        "Claim with a real citation [S1].\n\n"
+        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 1
+    assert "outside a citation bracket" in err
+    assert "line 3: S1, S2" in err
+    assert "line 4: S3" in err
+    assert "Cite each as [S#]" in err
+    assert not out.exists()
+    events = [json.loads(line) for line in
+              (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
+    assert events[-1]["ok"] is False
+    assert "bare source ids" in events[-1]["error"]
+
+
+def test_finalize_ignores_unknown_bare_tokens_and_bracketed_ids(tmp_path, capsys):
+    work = make_finalize_work(tmp_path)
+    draft = work / "draft.md"
+    draft.write_text(
+        "# Title\n\n"
+        "Model S999 is not a source; the claim is supported [S1].\n\n"
+        "## Resumen\n\n## Qué hacer\n\n## No verificado\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 0, err
+    assert out.exists()
