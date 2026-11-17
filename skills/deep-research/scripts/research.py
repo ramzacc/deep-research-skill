@@ -5,14 +5,17 @@ Subcommands
 -----------
 init      create the work dir for a slug and print the paths to use
 search    batch (plan.json) or ad-hoc (-subq/-query) web searches, merged on disk
-fetch     full text of one known source id
+fetch     full text of one source id (or a new URL), with optional --grep windows
 finalize  validate + renumber citations, add References, write the final report
 status    show which pipeline steps are done (used to resume)
 
-All state lives in a work dir (default: ~/research/.work/<slug>/):
+Search and page fetching use DeepSeek's Search & Fetch API ($0.00075 per
+successful request). All state lives in a work dir (default:
+~/research/.work/<slug>/):
 
     plan.json                 written by the agent
     sources.json              source registry (stable S-ids, merged under flock)
+    pages/<S#>.md             full page text per source, used for evidence passages
     evidence/<qid>.md         per-subquestion digest for subagents
     findings/<qid>.json       written by subagents (or by the agent)
     draft.md                  written by the agent
@@ -20,8 +23,8 @@ All state lives in a work dir (default: ~/research/.work/<slug>/):
 
 Only the Python standard library is used. Python >= 3.10.
 
-Exit codes: 0 ok, 1 operation failed (bad citations, network error), 2 bad
-input (invalid slug/plan/arguments or missing API key).
+Exit codes: 0 ok, 1 operation failed (bad citations, network error, no grep
+match), 2 bad input (invalid slug/plan/arguments or missing API key).
 """
 
 from __future__ import annotations
@@ -36,23 +39,17 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-EXA_SEARCH_URL = "https://api.exa.ai/search"
-EXA_CONTENTS_URL = "https://api.exa.ai/contents"
-SERPER_SEARCH_URL = "https://google.serper.dev/search"
-SERPER_USD_PER_CREDIT = 0.001
 DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
 DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
 DEEPSEEK_USD_PER_REQUEST = 0.00075
 DEEPSEEK_MAX_QUERY_CHARS = 128
-CONTENTS_BATCH_SIZE = 25
-TEXT_MAX_CHARS = 6000
-HIGHLIGHTS_PER_SOURCE = 8
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 QID_RE = re.compile(r"^q[0-9]+$")
 IDENTIFY_Q1_RE = re.compile(
@@ -69,25 +66,35 @@ MOCK_ENV = "DEEP_RESEARCH_MOCK"
 BACKOFF_ENV = "DEEP_RESEARCH_BACKOFF_BASE"
 
 # Results per query. DEEP_RESEARCH_NUM_RESULTS is the default; --num-results wins.
+# Search is billed per request, not per result, so a high count is free recall.
 NUM_RESULTS_ENV = "DEEP_RESEARCH_NUM_RESULTS"
-DEFAULT_NUM_RESULTS = 8
-# Characters of page text per source. DEEP_RESEARCH_MAX_CHARS is the default; --max-chars wins.
+DEFAULT_NUM_RESULTS = 20
+# Characters of page text kept per source in sources.json (the full page goes to
+# pages/<S#>.md). DEEP_RESEARCH_MAX_CHARS is the default; --max-chars wins.
 MAX_CHARS_ENV = "DEEP_RESEARCH_MAX_CHARS"
-DEFAULT_MAX_CHARS = TEXT_MAX_CHARS
-# Search backend: "exa" (default), "serper" or "deepseek".
-SEARCH_PROVIDER_ENV = "DEEP_RESEARCH_SEARCH_PROVIDER"
-DEFAULT_SEARCH_PROVIDER = "exa"
-# Exa /search type: "auto" (default) or the cheaper "lite".
-EXA_TYPE_ENV = "DEEP_RESEARCH_EXA_TYPE"
-DEFAULT_EXA_TYPE = "auto"
-# Serper mode: Exa /contents fetches the top N new results per query for page text.
-CONTENT_TOP_ENV = "DEEP_RESEARCH_CONTENT_TOP"
-DEFAULT_CONTENT_TOP = 5
-SERPER_KEY_ENV = "DEEP_RESEARCH_SERPER_KEY"
+DEFAULT_MAX_CHARS = 6000
+TEXT_MAX_CHARS = DEFAULT_MAX_CHARS
+# Full page text cached per source in pages/<S#>.md.
+PAGE_MAX_CHARS = 300_000
+PAGES_DIR = "pages"
+# Evidence digest: characters of selected passages per source, and how many
+# sources get a full section (the rest are one-line entries).
+PASSAGE_CHARS = 1500
+DIGEST_FULL_LIMIT = 25
+# fetch --grep: context characters around a match, and the window cap.
+GREP_WINDOW = 400
+GREP_MAX_WINDOWS = 15
 DEEPSEEK_KEY_ENV = "DEEP_RESEARCH_DEEPSEEK_KEY"
 LOG_FILE = "log.jsonl"
 QUERY_INDEX = "queries.json"
-SITE_TOKEN_RE = re.compile(r"\bsite:(\S+)", re.IGNORECASE)
+
+# Hosts whose content is user-generated or low accountability; tagged in the
+# evidence digest, never filtered out.
+SOCIAL_HOSTS = (
+    "facebook.com", "instagram.com", "threads.net", "tiktok.com", "x.com",
+    "twitter.com", "linkedin.com", "quora.com", "reddit.com", "weixin.qq.com",
+    "qq.com", "zhihu.com", "medium.com", "substack.com", "youtube.com",
+)
 
 _MOCK_CACHE: dict[str, tuple[float, dict]] = {}
 _MOCK_STATE: dict[str, dict] = {}
@@ -236,43 +243,34 @@ def _load_mock_fixture() -> dict:
     return fixture
 
 
-def _mock_route(payload: dict, endpoint: str) -> dict | None:
+def _mock_route(payload: dict) -> dict | None:
     fixture = _load_mock_fixture()
     routes = fixture.get("routes") or []
-    if endpoint == "serper":
-        haystack = str(payload.get("q", ""))
-    elif endpoint == "deepseek":
-        haystack = str(payload.get("query", "") or payload.get("url", ""))
-    elif endpoint == "search":
-        haystack = str(payload.get("query", ""))
-    else:
-        haystack = " ".join(str(u) for u in payload.get("urls", []))
+    haystack = str(payload.get("query", "") or payload.get("url", ""))
     matches = []
     for idx, route in enumerate(routes):
         if not isinstance(route, dict):
             continue
-        if (route.get("endpoint") or "search") != endpoint:
+        if (route.get("endpoint") or "deepseek") != "deepseek":
             continue
         needle = route.get("contains")
         if needle and needle not in haystack:
             continue
         matches.append((idx, route))
     if not matches:
-        default_key = {"contents": "default_contents", "serper": "default_serper",
-                       "deepseek": "default_deepseek"}.get(endpoint, "default")
-        default = fixture.get(default_key)
+        default = fixture.get("default_deepseek") or fixture.get("default")
         return {"responses": [default]} if default else None
     # most specific match wins: longest matched needle, then declaration order
     matches.sort(key=lambda pair: (-len(pair[1].get("contains") or ""), pair[0]))
     return matches[0][1]
 
 
-def _mock_response(endpoint: str, payload: dict) -> dict:
-    route = _mock_route(payload, endpoint)
+def _mock_response(payload: dict) -> dict:
+    route = _mock_route(payload)
     if route is None:
-        raise HttpError(599, f"no mock route for {endpoint} payload {json.dumps(payload)[:300]}")
+        raise HttpError(599, f"no mock route for payload {json.dumps(payload)[:300]}")
     responses = route.get("responses") or [{"json": {}}]
-    key = f"{os.environ.get(MOCK_ENV)}::{id(route)}::{endpoint}"
+    key = f"{os.environ.get(MOCK_ENV)}::{id(route)}"
     with _MOCK_LOCK:
         state = _MOCK_STATE.setdefault(key, {"used": 0})
         index = min(state["used"], len(responses) - 1)
@@ -287,24 +285,16 @@ def _mock_response(endpoint: str, payload: dict) -> dict:
     return entry.get("json") or {}
 
 
-def http_post_json(url: str, payload: dict, api_key: str | None = None, timeout: float = 45.0,
+def http_post_json(url: str, payload: dict, timeout: float = 45.0,
                    headers: dict[str, str] | None = None) -> dict:
     """POST JSON, return parsed JSON. Raises HttpError on any failure."""
-    if url == SERPER_SEARCH_URL:
-        endpoint = "serper"
-    elif url in (DEEPSEEK_SEARCH_URL, DEEPSEEK_FETCH_URL):
-        endpoint = "deepseek"
-    else:
-        endpoint = "contents" if url.endswith("/contents") else "search"
     if os.environ.get(MOCK_ENV):
-        return _mock_response(endpoint, payload)
+        return _mock_response(payload)
     body = json.dumps(payload).encode("utf-8")
     request_headers = {
         "Content-Type": "application/json",
         "User-Agent": "hermes-deep-research/1.0",
     }
-    if api_key:
-        request_headers["x-api-key"] = api_key
     if headers:
         request_headers.update(headers)
     req = urllib.request.Request(
@@ -325,7 +315,7 @@ def http_post_json(url: str, payload: dict, api_key: str | None = None, timeout:
 
 
 def default_num_results() -> int:
-    """Results per query: DEEP_RESEARCH_NUM_RESULTS, then 8. The CLI flag wins."""
+    """Results per query: DEEP_RESEARCH_NUM_RESULTS, then 20. The CLI flag wins."""
     raw = os.environ.get(NUM_RESULTS_ENV, "").strip()
     if not raw:
         return DEFAULT_NUM_RESULTS
@@ -356,91 +346,16 @@ def default_max_chars() -> int:
     return value
 
 
-def default_content_top() -> int:
-    """Page texts fetched per query in Serper mode: DEEP_RESEARCH_CONTENT_TOP, then 5."""
-    raw = os.environ.get(CONTENT_TOP_ENV, "").strip()
-    if not raw:
-        return DEFAULT_CONTENT_TOP
-    try:
-        value = int(raw)
-    except ValueError:
-        note(f"warning: {CONTENT_TOP_ENV}={raw!r} is not an integer; using {DEFAULT_CONTENT_TOP}")
-        return DEFAULT_CONTENT_TOP
-    if value < 0:
-        note(f"warning: {CONTENT_TOP_ENV}={value} is below 0; using {DEFAULT_CONTENT_TOP}")
-        return DEFAULT_CONTENT_TOP
-    return value
-
-
-def search_provider() -> str:
-    """Search backend: DEEP_RESEARCH_SEARCH_PROVIDER, then "exa"."""
-    raw = os.environ.get(SEARCH_PROVIDER_ENV, "").strip().lower()
-    if not raw:
-        return DEFAULT_SEARCH_PROVIDER
-    if raw not in ("exa", "serper", "deepseek"):
-        die(
-            f"error: {SEARCH_PROVIDER_ENV}={raw!r} is invalid; "
-            "choose 'exa' (default), 'serper' or 'deepseek'.",
-            2,
-        )
-    return raw
-
-
-def exa_search_type() -> str:
-    """Exa /search type: DEEP_RESEARCH_EXA_TYPE, then "auto"."""
-    raw = os.environ.get(EXA_TYPE_ENV, "").strip().lower()
-    if not raw:
-        return DEFAULT_EXA_TYPE
-    if raw not in ("auto", "lite"):
-        die(
-            f"error: {EXA_TYPE_ENV}={raw!r} is invalid; choose 'auto' (default) or 'lite'.",
-            2,
-        )
-    return raw
-
-
-def serper_key_required() -> str:
-    key = os.environ.get(SERPER_KEY_ENV, "").strip()
-    if not key:
-        die(
-            f"error: {SERPER_KEY_ENV} is not set.\n"
-            "Serper mode needs a Serper API key:\n"
-            f"  hermes config set {SERPER_KEY_ENV} <your key>",
-            2,
-        )
-    return key
-
-
 def deepseek_key_required() -> str:
     key = os.environ.get(DEEPSEEK_KEY_ENV, "").strip()
     if not key:
         die(
             f"error: {DEEPSEEK_KEY_ENV} is not set.\n"
-            "DeepSeek mode needs a DeepSeek API key:\n"
+            "Deep research needs a DeepSeek API key:\n"
             f"  hermes config set {DEEPSEEK_KEY_ENV} <your key>",
             2,
         )
     return key
-
-
-def split_site_operators(query: str) -> tuple[str, list[str]]:
-    """Move site:domain tokens out of the query text (Exa wants includeDomains).
-
-    Returns (query_text, domains). A query made only of site: tokens keeps its
-    original text; the domains are still returned.
-    """
-    domains: list[str] = []
-
-    def collect(match: re.Match) -> str:
-        domain = match.group(1).strip().strip("\"'").lower().rstrip("/")
-        if domain and domain not in domains:
-            domains.append(domain)
-        return " "
-
-    stripped = " ".join(SITE_TOKEN_RE.sub(collect, query).split())
-    if not domains:
-        return query, domains
-    return (stripped or query), domains
 
 
 def backoff_base() -> float:
@@ -467,74 +382,9 @@ def with_retries(fn, attempts: int = 3, label: str = "request"):
     raise last or HttpError(0, "retry loop produced no result")
 
 
-def exa_key_required() -> str:
-    key = (
-        os.environ.get("DEEP_RESEARCH_EXA_KEY", "").strip()
-        or os.environ.get("EXA_API_KEY", "").strip()
-    )
-    if not key and not os.environ.get(MOCK_ENV):
-        die(
-            "error: DEEP_RESEARCH_EXA_KEY is not set.\n"
-            "Set it to your Exa API key (the same value as EXA_API_KEY):\n"
-            "  hermes config set DEEP_RESEARCH_EXA_KEY <your key>\n"
-            "Then re-run the command. The skill uses Exa's REST API directly.",
-            2,
-        )
-    return key
-
-
-def exa_search(query: str, num_results: int, max_chars: int, api_key: str) -> tuple[list[dict], float]:
-    query_text, domains = split_site_operators(query)
-    payload = {
-        "query": query_text,
-        "type": exa_search_type(),
-        "numResults": num_results,
-        "contents": {"text": {"maxCharacters": max_chars}, "highlights": True},
-    }
-    if domains:
-        payload["includeDomains"] = domains
-    data = http_post_json(EXA_SEARCH_URL, payload, api_key)
-    results = data.get("results") or []
-    if not isinstance(results, list):
-        results = []
-    cost = 0.0
-    try:
-        cost = float((data.get("costDollars") or {}).get("total") or 0.0)
-    except (TypeError, ValueError):
-        cost = 0.0
-    return results, cost
-
-
-def serper_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], float]:
-    payload = {"q": query, "num": num_results}
-    data = http_post_json(SERPER_SEARCH_URL, payload, headers={"X-API-KEY": api_key})
-    organic = data.get("organic") or []
-    if not isinstance(organic, list):
-        organic = []
-    results: list[dict] = []
-    for item in organic:
-        if not isinstance(item, dict):
-            continue
-        url = str(item.get("link") or "").strip()
-        if not url:
-            continue
-        snippet = str(item.get("snippet") or "").strip()
-        results.append({
-            "url": url,
-            "title": str(item.get("title") or "").strip(),
-            "publishedDate": item.get("date") or "",
-            "highlights": [snippet] if snippet else [],
-        })
-    credits = data.get("credits")
-    try:
-        cost = float(credits) * SERPER_USD_PER_CREDIT if credits is not None else SERPER_USD_PER_CREDIT
-    except (TypeError, ValueError):
-        cost = SERPER_USD_PER_CREDIT
-    return results, cost
-
-
-def truncate_deepseek_query(query: str) -> str:
+def truncate_deepseek_query(query: str, label: str = "query") -> str:
     """Cut a query to DeepSeek's 128-character limit at a word boundary."""
+    query = str(query or "").strip()
     if len(query) <= DEEPSEEK_MAX_QUERY_CHARS:
         return query
     cut = query[:DEEPSEEK_MAX_QUERY_CHARS]
@@ -543,7 +393,7 @@ def truncate_deepseek_query(query: str) -> str:
         cut = cut[:boundary]
     cut = cut.rstrip()
     note(
-        f"warning: query is {len(query)} chars; DeepSeek accepts at most "
+        f"warning: {label} is {len(query)} chars; DeepSeek accepts at most "
         f"{DEEPSEEK_MAX_QUERY_CHARS}; sending {len(cut)}"
     )
     return cut
@@ -565,12 +415,25 @@ def _strip_url_fragment(url: str) -> str:
     return str(url or "").split("#", 1)[0].strip()
 
 
-def deepseek_search(query: str, num_results: int, max_chars: int, api_key: str) -> tuple[list[dict], float]:
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def deepseek_search(query: str, num_results: int, api_key: str,
+                    ori_question: str = "") -> tuple[list[dict], float]:
+    """One DeepSeek search request. Returns (results, cost).
+
+    Each result carries the full page content (capped at PAGE_MAX_CHARS); the
+    registry keeps only the leading TEXT_MAX_CHARS as `text`.
+    """
     payload = {
-        "query": truncate_deepseek_query(query),
+        "query": truncate_deepseek_query(query, "query"),
         "count": num_results,
         "need_content": True,
     }
+    ori = truncate_deepseek_query(ori_question, "ori_question")
+    if ori:
+        payload["ori_question"] = ori
     data = _deepseek_post(DEEPSEEK_SEARCH_URL, payload, api_key)
     raw = data.get("results") or []
     if not isinstance(raw, list):
@@ -582,21 +445,17 @@ def deepseek_search(query: str, num_results: int, max_chars: int, api_key: str) 
         url = _strip_url_fragment(item.get("url", ""))
         if not url:
             continue
-        summary = str(item.get("summary") or "").strip()
-        snippet = str(item.get("snippet") or "").strip()
         result = {
             "url": url,
             "title": str(item.get("title") or "").strip(),
             "publishedDate": item.get("date") or "",
-            "highlights": [summary] if summary else ([snippet] if snippet else []),
-            "text": str(item.get("content") or "")[:max_chars],
+            "summary": str(item.get("summary") or "").strip(),
+            "content": str(item.get("content") or "")[:PAGE_MAX_CHARS],
         }
-        authority = item.get("authority")
-        if isinstance(authority, int) and not isinstance(authority, bool) and authority >= 0:
-            result["authority"] = authority
-        rerank = item.get("rerank_score")
-        if isinstance(rerank, (int, float)) and not isinstance(rerank, bool):
-            result["rerank"] = rerank
+        if _is_number(item.get("authority")) and item["authority"] >= 0:
+            result["authority"] = item["authority"]
+        if _is_number(item.get("rerank_score")):
+            result["rerank"] = item["rerank_score"]
         results.append(result)
     # A successful request with no results is not billed.
     return results, (DEEPSEEK_USD_PER_REQUEST if raw else 0.0)
@@ -612,110 +471,35 @@ def deepseek_fetch(url: str, max_chars: int, api_key: str) -> tuple[dict, float]
     return page, (DEEPSEEK_USD_PER_REQUEST if content else 0.0)
 
 
-def exa_contents_batch(urls: list[str], max_chars: int, api_key: str) -> tuple[list[dict], float]:
-    payload = {"urls": urls, "text": {"maxCharacters": max_chars}}
-    data = http_post_json(EXA_CONTENTS_URL, payload, api_key)
-    results = data.get("results") or []
-    if not isinstance(results, list):
-        results = []
+# --------------------------------------------------------------------------
+# page cache
+# --------------------------------------------------------------------------
+
+def page_path(work: Path, sid: str) -> Path:
+    return work / PAGES_DIR / f"{sid}.md"
+
+
+def read_page(work: Path, sid: str) -> str:
     try:
-        cost = float((data.get("costDollars") or {}).get("total") or 0.0)
-    except (TypeError, ValueError):
-        cost = 0.0
-    return results, cost
+        return page_path(work, sid).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
-def exa_contents(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
-    results, cost = exa_contents_batch([url], max_chars, api_key)
-    if not results or not isinstance(results[0], dict):
-        raise HttpError(502, f"/contents returned no result for {url}")
-    return results[0], cost
-
-
-def content_fetch_items(records: list[dict], registry: dict, top: int) -> list[tuple[dict, dict, str]]:
-    """Pick the page texts to fetch in Serper mode.
-
-    Per record: the first *top* results whose normalized URL has no text in the
-    registry; the URL set is deduped across all records of this invocation.
-    Returns [(record, result_item, normalized_url)].
-    """
-    with_text = {
-        normalize_url(src.get("url", ""))
-        for src in registry.get("sources") or []
-        if str(src.get("text") or "").strip()
-    }
-    picked: list[tuple[dict, dict, str]] = []
-    seen: set[str] = set()
-    for record in records:
-        if not record.get("ok"):
-            continue
-        count = 0
-        for item in record.get("results") or []:
-            if not isinstance(item, dict):
-                continue
-            norm = normalize_url(item.get("url", ""))
-            if not norm or norm in with_text:
-                continue
-            if count >= top:
-                break
-            count += 1
-            if norm in seen:
-                continue
-            seen.add(norm)
-            picked.append((record, item, norm))
-    return picked
-
-
-def fetch_content_texts(picked: list[tuple[dict, dict, str]], max_chars: int, api_key: str,
-                        workers: int) -> float:
-    """Fetch page text for *picked* in batches of 25. Returns the total cost.
-
-    Failures are reported on stderr and never fatal: those sources keep the
-    Serper snippet. Cost is attributed evenly to the URLs in each batch so
-    per-query log records still add up to the invocation's cost.
-    """
-    if not picked:
-        return 0.0
-    groups = [picked[i:i + CONTENTS_BATCH_SIZE] for i in range(0, len(picked), CONTENTS_BATCH_SIZE)]
-
-    def run_group(group: list[tuple[dict, dict, str]]) -> tuple[list[dict], float]:
-        urls = [item.get("url", "") for _record, item, _norm in group]
-        return with_retries(
-            lambda: exa_contents_batch(urls, max_chars, api_key), 3, f"contents batch ({len(urls)} urls)"
-        )
-
-    total = 0.0
-    workers = max(1, min(workers, len(groups)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        future_map = {pool.submit(run_group, group): group for group in groups}
-        for future in concurrent.futures.as_completed(future_map):
-            group = future_map[future]
-            try:
-                results, cost = future.result()
-            except HttpError as exc:
-                note(f"  contents fetch failed for {len(group)} url(s): {exc}")
-                continue
-            total += cost
-            texts: dict[str, str] = {}
-            for index, result in enumerate(results):
-                if not isinstance(result, dict):
-                    continue
-                text = str(result.get("text") or "")
-                for key in ("url", "id"):
-                    norm = normalize_url(str(result.get(key) or ""))
-                    if norm:
-                        texts.setdefault(norm, text)
-                if not result.get("url") and not result.get("id") and index < len(group):
-                    texts.setdefault(group[index][2], text)
-            share = cost / len(group)
-            for record, item, norm in group:
-                record["cost"] = float(record.get("cost") or 0.0) + share
-                text = texts.get(norm, "")
-                if text:
-                    item["text"] = text
-                else:
-                    note(f"  no page text for {item.get('url')} (keeping snippet only)")
-    return total
+def store_page(work: Path, sid: str, content: str) -> bool:
+    """Cache page text, keeping the longer copy. Returns True when written."""
+    content = str(content or "")
+    if not content:
+        return False
+    if len(content) <= len(read_page(work, sid)):
+        return False
+    try:
+        (work / PAGES_DIR).mkdir(parents=True, exist_ok=True)
+        write_text_atomic(page_path(work, sid), content[:PAGE_MAX_CHARS])
+    except OSError as exc:
+        note(f"warning: could not cache page for {sid}: {exc}")
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -825,19 +609,26 @@ def reserve_queries(work: Path, queries: list[str]) -> tuple[list[str], list[str
     return new, skipped
 
 
-def merge_records(registry: dict, records: list[dict], changes: list[dict] | None = None) -> tuple[list[str], list[str]]:
-    """Merge search records into the registry in place.
-
-    records: [{"qid": "q1", "query": "...", "results": [exa result, ...]}]
-    Returns (new_ids, touched_ids). When *changes* is a list, one
-    {"new_ids": [...], "matched_ids": [...]} entry per record is appended.
-    """
-    by_norm = {normalize_url(src.get("url", "")): src for src in registry["sources"]}
+def _next_source_num(registry: dict) -> int:
     next_num = 1
     for src in registry["sources"]:
         match = re.match(r"^S([0-9]+)$", str(src.get("id", "")))
         if match:
             next_num = max(next_num, int(match.group(1)) + 1)
+    return next_num
+
+
+def merge_records(registry: dict, records: list[dict], changes: list[dict] | None = None,
+                  work: Path | None = None, text_chars: int = TEXT_MAX_CHARS) -> tuple[list[str], list[str]]:
+    """Merge search records into the registry in place.
+
+    records: [{"qid": "q1", "query": "...", "results": [deepseek result, ...]}]
+    Returns (new_ids, touched_ids). When *changes* is a list, one
+    {"new_ids": [...], "matched_ids": [...]} entry per record is appended.
+    Full page content is cached in pages/<S#>.md when *work* is given.
+    """
+    by_norm = {normalize_url(src.get("url", "")): src for src in registry["sources"]}
+    next_num = _next_source_num(registry)
     new_ids: list[str] = []
     touched: list[str] = []
     for record in records:
@@ -859,10 +650,9 @@ def merge_records(registry: dict, records: list[dict], changes: list[dict] | Non
                     "url": url,
                     "title": str(item.get("title") or "").strip(),
                     "published": item.get("publishedDate") or "",
-                    "author": item.get("author") or "",
                     "subquestions": [],
                     "queries": [],
-                    "highlights": [],
+                    "summary": "",
                     "text": "",
                 }
                 next_num += 1
@@ -874,24 +664,25 @@ def merge_records(registry: dict, records: list[dict], changes: list[dict] | Non
                 src["title"] = str(item.get("title") or "").strip()
             if not src.get("published"):
                 src["published"] = item.get("publishedDate") or ""
-            if not src.get("author"):
-                src["author"] = item.get("author") or ""
+            if not src.get("summary"):
+                src["summary"] = str(item.get("summary") or "").strip()
             for field in ("authority", "rerank"):
-                if src.get(field) is None and item.get(field) is not None:
-                    src[field] = item[field]
+                value = item.get(field)
+                if not _is_number(value):
+                    continue
+                if src.get(field) is None or value > src[field]:
+                    src[field] = value
             if qid and qid not in src["subquestions"]:
                 src["subquestions"].append(qid)
             if query and query not in src["queries"]:
                 src["queries"].append(query)
-            highlights = item.get("highlights") or []
-            if isinstance(highlights, list):
-                for hl in highlights:
-                    hl = str(hl).strip()
-                    if hl and hl not in src["highlights"] and len(src["highlights"]) < HIGHLIGHTS_PER_SOURCE:
-                        src["highlights"].append(hl)
-            text = str(item.get("text") or "")
-            if text and not src.get("text"):
-                src["text"] = text[:TEXT_MAX_CHARS]
+            content = str(item.get("content") or "")
+            if content:
+                short = content[:text_chars]
+                if len(short) > len(src.get("text") or ""):
+                    src["text"] = short
+            if work is not None:
+                store_page(work, src["id"], content)
             touched.append(src["id"])
             record_touched.append(src["id"])
         if changes is not None:
@@ -899,6 +690,32 @@ def merge_records(registry: dict, records: list[dict], changes: list[dict] | Non
     # keep first-appearance order stable even if an id was seen again later
     registry["updated"] = utcnow()
     return new_ids, touched
+
+
+def register_url(work: Path, slug: str, url: str, qid: str) -> tuple[dict, bool]:
+    """Add a URL that no search returned yet. Returns (source, created)."""
+    norm = normalize_url(url)
+    with sources_lock(work):
+        registry = load_registry(work / "sources.json", slug)
+        src = next((s for s in registry["sources"] if normalize_url(s.get("url", "")) == norm), None)
+        created = src is None
+        if src is None:
+            src = {
+                "id": f"S{_next_source_num(registry)}",
+                "url": url,
+                "title": "",
+                "published": "",
+                "subquestions": [qid] if qid else [],
+                "queries": [],
+                "summary": "",
+                "text": "",
+            }
+            registry["sources"].append(src)
+        elif qid and qid not in src.setdefault("subquestions", []):
+            src["subquestions"].append(qid)
+        registry["updated"] = utcnow()
+        write_json_atomic(work / "sources.json", registry)
+    return src, created
 
 
 def source_by_id(registry: dict, sid: str) -> dict | None:
@@ -912,6 +729,170 @@ def sources_for(registry: dict, qid: str) -> list[dict]:
     return [src for src in registry["sources"] if qid in (src.get("subquestions") or [])]
 
 
+# --------------------------------------------------------------------------
+# passages, ranking, evidence
+# --------------------------------------------------------------------------
+
+SPANISH_HINTS = frozenset("""
+de la que el en los se del las un por con no una su para es al lo como mas pero sus le ya o
+este si porque esta entre cuando muy sin sobre tambien me hasta hay donde quien desde todo nos
+durante todos uno les ni contra otros ese eso ante ellos e esto mi antes algunos que unos yo
+otro otras otra el tanto esa estos mucho quienes nada muchos cual poco ella estar estas algunas
+algo nosotros mi mis tu te ti tus ellas nosotras vosotros vosotras os mio mia mios mias tuyo
+tuya tuyos tuyas suyo suya suyos suyas nuestro nuestra nuestros nuestras vuestro vuestra
+""".split())
+ENGLISH_HINTS = frozenset("""
+the of and to in a is that for it as was with be by on not he i this are or his from at which
+but have an they you were her she there one all we their has had what would will can been when
+who more no if out so said up its about into than them only other some could time these two
+may then do first any my now such like our over man me even most made after also did many off
+before must through back years where much your way well down should because each just those
+people how too little state good very make world still own see men work long get here between
+both life being under never day same another know while last might us great old year come since
+against go came right used take three
+""".split())
+QUERY_STOPWORDS = SPANISH_HINTS | ENGLISH_HINTS | frozenset({
+    "search", "results", "result", "http", "https", "www", "com", "site", "query",
+    "official", "página", "pagina", "page", "filetype", "pdf",
+})
+WORD_RE = re.compile(r"[a-z0-9]+")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ0-9\"“'])")
+PASSAGE_VALUE_RE = re.compile(
+    r"\d|\b(?:usd|eur|pen|mxn|clp|ars|cop|brl|gbp|soles?|d[óo]lares?)\b|[€£¥$]",
+    re.IGNORECASE,
+)
+
+
+def fold(text: str) -> str:
+    """Lowercase and strip accents (NFKD) for term matching."""
+    decomposed = unicodedata.normalize("NFKD", str(text or "").lower())
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def query_terms(*texts: str) -> set[str]:
+    """Distinct content words of the query text, accent-folded, stopwords removed."""
+    terms: set[str] = set()
+    for text in texts:
+        for word in WORD_RE.findall(fold(text)):
+            if len(word) < 3 or word.isdigit() or word in QUERY_STOPWORDS:
+                continue
+            terms.add(word)
+    return terms
+
+
+def split_passages(text: str, max_unit: int = 600) -> list[str]:
+    """Paragraphs, long ones split into sentences, each unit <= max_unit chars."""
+    units: list[str] = []
+    for block in re.split(r"\n\s*\n", str(text or "")):
+        block = " ".join(block.split())
+        if not block:
+            continue
+        if len(block) <= max_unit:
+            units.append(block)
+            continue
+        for sentence in SENTENCE_SPLIT_RE.split(block):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) <= max_unit:
+                units.append(sentence)
+            else:
+                units.extend(
+                    sentence[start:start + max_unit]
+                    for start in range(0, len(sentence), max_unit)
+                )
+    return units
+
+
+def select_passages(content: str, terms: set[str], max_chars: int = PASSAGE_CHARS) -> str:
+    """Most query-relevant passages of *content*, in document order, `…` between.
+
+    A passage scores one point per distinct query term it contains, plus a bonus
+    when it carries a number, currency or date (where verifiable values live).
+    Falls back to the leading text when nothing matches.
+    """
+    units = split_passages(content)
+    if not units:
+        return ""
+    if not terms:
+        return " ".join(units)[:max_chars]
+    scored: list[tuple[float, int]] = []
+    for index, unit in enumerate(units):
+        folded = fold(unit)
+        words = set(WORD_RE.findall(folded))
+        hits = len(words & terms)
+        if not hits:
+            continue
+        bonus = 2.0 if PASSAGE_VALUE_RE.search(unit) else 0.0
+        scored.append((hits + bonus, index))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    chosen: list[tuple[int, str]] = []
+    used = 0
+    for _score, index in scored:
+        extra = len("\n…\n") if chosen else 0
+        remaining = max_chars - used - extra
+        if remaining <= 0:
+            break
+        piece = units[index][:remaining].rstrip()
+        if not piece:
+            continue
+        chosen.append((index, piece))
+        used += len(piece) + extra
+    if not chosen:
+        return " ".join(units)[:max_chars]
+    chosen.sort()
+    return "\n…\n".join(piece for _index, piece in chosen)
+
+
+def source_passages(work: Path, src: dict, question: str,
+                    max_chars: int = PASSAGE_CHARS) -> str:
+    """Passages for one source: cached full page, else the short registry text.
+
+    Query terms come from the subquestion plus every query that returned this
+    source (the registry keeps one queries list per source, not per subquestion).
+    """
+    content = read_page(work, src.get("id", "")) or str(src.get("text") or "")
+    terms = query_terms(question, *(src.get("queries") or []))
+    return select_passages(content, terms, max_chars)
+
+
+def _sid_num(sid) -> int:
+    digits = re.sub(r"[^0-9]", "", str(sid or ""))
+    return int(digits) if digits else 0
+
+
+def _rank_value(src: dict) -> tuple[float, int, str]:
+    rerank = src.get("rerank")
+    authority = src.get("authority")
+    return (
+        float(rerank) if _is_number(rerank) else -1.0,
+        int(authority) if isinstance(authority, int) and not isinstance(authority, bool) else -1,
+        str(src.get("published") or ""),
+    )
+
+
+def rank_sources(sources: list[dict]) -> list[dict]:
+    """Order by best rerank, then authority, then newest; stable on S-id."""
+    ordered = sorted(sources, key=lambda src: _sid_num(src.get("id")))
+    return sorted(ordered, key=_rank_value, reverse=True)
+
+
+def is_social_host(url: str) -> bool:
+    host = host_of(url)
+    return any(host == domain or host.endswith("." + domain) for domain in SOCIAL_HOSTS)
+
+
+def source_quality_tags(src: dict) -> list[str]:
+    """Digest tags that warn about source quality. They never filter a source out."""
+    tags: list[str] = []
+    authority = src.get("authority")
+    if isinstance(authority, int) and not isinstance(authority, bool) and 0 <= authority <= 1:
+        tags.append("low-authority")
+    if is_social_host(src.get("url", "")):
+        tags.append("social/forum")
+    return tags
+
+
 def format_date(value) -> str:
     text = str(value or "").strip()
     if not text:
@@ -920,46 +901,82 @@ def format_date(value) -> str:
     return match.group(1) if match else text[:24]
 
 
-def source_section(src: dict, max_text_chars: int) -> str:
-    day = format_date(src.get("published"))
-    when = f" ({day})" if day else ""
-    lines = [f"### [{src['id']}] {src.get('title') or '(untitled)'}{when} — {src.get('url')}"]
-    header = lines[0]
-    if src.get("authority") is not None:
-        header += f" · authority {src['authority']}"
-    if src.get("rerank") is not None:
-        header += f" · rerank {src['rerank']:g}"
-    lines[0] = header
-    for highlight in src.get("highlights") or []:
-        lines.append(f"- {highlight}")
-    text = re.sub(r"\s+", " ", str(src.get("text") or "")).strip()
-    if text:
-        lines += ["", text[:max_text_chars]]
+def _source_header(src: dict) -> str:
+    when = format_date(src.get("published")) or "undated"
+    header = f"### [{src['id']}] {src.get('title') or '(untitled)'} ({when}) — {src.get('url')}"
+    authority = src.get("authority")
+    if isinstance(authority, int) and not isinstance(authority, bool):
+        header += f" · authority {authority}"
+    rerank = src.get("rerank")
+    if _is_number(rerank):
+        header += f" · rerank {rerank:g}"
+    tags = source_quality_tags(src)
+    if tags:
+        header += " · " + " · ".join(tags)
+    return header
+
+
+def source_section(work: Path, src: dict, question: str,
+                   max_text_chars: int = PASSAGE_CHARS) -> str:
+    lines = [_source_header(src)]
+    summary = " ".join(str(src.get("summary") or "").split())
+    if summary:
+        lines.append(f"- {summary}")
+    passages = source_passages(work, src, question, max_text_chars)
+    if passages:
+        lines += ["", passages]
     lines.append("")
     return "\n".join(lines)
 
 
-def render_evidence(qid: str, question: str, sources: list[dict], max_text_chars: int = 1500) -> str:
+def source_one_liner(src: dict) -> str:
+    authority = src.get("authority")
+    if not isinstance(authority, int) or isinstance(authority, bool):
+        authority_text = "authority unknown"
+    else:
+        authority_text = f"authority {authority}"
+    when = format_date(src.get("published")) or "undated"
+    line = (
+        f"[{src['id']}] {src.get('title') or '(untitled)'} — {src.get('url')} · "
+        f"{authority_text} · {when}"
+    )
+    tags = source_quality_tags(src)
+    if tags:
+        line += " · " + " · ".join(tags)
+    return line
+
+
+def render_evidence(qid: str, question: str, sources: list[dict], work: Path) -> str:
     lines = [f"# {qid} — {question}", ""]
     if not sources:
         lines += ["No sources collected for this subquestion yet.", ""]
         return "\n".join(lines)
+    ranked = rank_sources(sources)
+    full = ranked[:DIGEST_FULL_LIMIT]
+    rest = ranked[DIGEST_FULL_LIMIT:]
     lines += [
         f"{len(sources)} candidate sources. Cite them as [S#]; ids are stable.",
+        f"Full sections for the top {len(full)} (best rerank/authority/date); the rest are "
+        "one-liners you can still fetch with `fetch --id S#`.",
         "",
     ]
-    for src in sources:
-        lines.append(source_section(src, max_text_chars))
+    for src in full:
+        lines.append(source_section(work, src, question))
+    if rest:
+        lines += ["## Other candidates", ""]
+        lines += [source_one_liner(src) for src in rest]
+        lines.append("")
     return "\n".join(lines)
 
 
-def append_evidence(path: Path, qid: str, question: str, sources: list[dict], max_text_chars: int = 1500) -> list[dict]:
+def append_evidence(path: Path, qid: str, question: str, sources: list[dict],
+                    work: Path) -> list[dict]:
     """Append source sections not already present. Returns the sources appended."""
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    fresh = [src for src in sources if f"### [{src['id']}]" not in existing]
+    fresh = [src for src in rank_sources(sources) if f"### [{src['id']}]" not in existing]
     if not fresh:
         return []
-    chunk = "\n".join(source_section(src, max_text_chars) for src in fresh)
+    chunk = "\n".join(source_section(work, src, question) for src in fresh)
     if existing.strip():
         with path.open("a", encoding="utf-8") as handle:
             handle.write("\n## Added by follow-up searches\n\n" + chunk)
@@ -1094,11 +1111,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     work = Path(args.work).expanduser().resolve() if args.work else default_work_dir(slug)
     (work / "evidence").mkdir(parents=True, exist_ok=True)
     (work / "findings").mkdir(parents=True, exist_ok=True)
+    (work / PAGES_DIR).mkdir(parents=True, exist_ok=True)
     plan_path = work / "plan.json"
     print(f"work dir: {work}")
     print(f"plan file: {plan_path}")
     print(f"evidence dir: {work / 'evidence'}")
     print(f"findings dir: {work / 'findings'}")
+    print(f"pages dir: {work / PAGES_DIR}")
     if plan_path.exists():
         print("note: plan.json already exists; it will be reused (overwrite it to re-plan)")
     if not (work / "sources.json").exists():
@@ -1107,27 +1126,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_query(query: str, num_results: int, max_chars: int, api_key: str) -> tuple[list[dict], float]:
-    return exa_search(query, num_results, max_chars, api_key)
-
-
-def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace, api_key: str,
-                     provider: str = "exa") -> tuple[list[dict], int]:
+def _execute_queries(pairs: list[tuple[str, str]], questions: dict[str, str],
+                     args: argparse.Namespace, api_key: str) -> tuple[list[dict], int]:
     """Run (qid, query) pairs in parallel. Returns (records, failures)."""
     records: list[dict] = []
     failures = 0
 
-    def run(query: str) -> tuple[list[dict], float]:
-        if provider == "serper":
-            return serper_search(query, args.num_results, api_key)
-        if provider == "deepseek":
-            return deepseek_search(query, args.num_results, args.max_chars, api_key)
-        return _run_query(query, args.num_results, args.max_chars, api_key)
+    def run(qid: str, query: str) -> tuple[list[dict], float]:
+        return deepseek_search(query, args.num_results, api_key, questions.get(qid, ""))
 
     workers = max(1, min(args.workers, len(pairs) or 1))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {
-            pool.submit(with_retries, lambda q=query: run(q), 3, query): (qid, query)
+            pool.submit(with_retries, lambda q=query, i=qid: run(i, q), 3, query): (qid, query)
             for qid, query in pairs
         }
         results: dict[tuple[str, str], dict] = {}
@@ -1177,6 +1188,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 break
         question = question or "(ad-hoc follow-up)"
         pairs = [(args.subq, query) for query in args.query]
+        questions = {args.subq: question}
     else:
         if not plan_path.exists():
             die(
@@ -1188,7 +1200,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         plan = read_json(plan_path, "plan.json")
         subquestions = validate_plan(plan)
         pairs = []
+        questions = {}
         for item in subquestions:
+            questions[item["id"]] = str(item.get("question") or "")
             for query in item["queries"]:
                 pairs.append((item["id"], query))
     if args.dry_run:
@@ -1202,22 +1216,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             for qid in sorted(counts, key=lambda q: int(q[1:])):
                 print(f"  {qid}: {counts[qid]} queries")
         return 0
-    provider = search_provider()
-    exa_search_type()  # fail fast on an invalid value, before any parallel call
-    content_top = default_content_top() if provider == "serper" else 0
-    if pairs:
-        if provider == "serper":
-            api_key = serper_key_required()
-            contents_key = exa_key_required() if content_top > 0 else ""
-        elif provider == "deepseek":
-            api_key = deepseek_key_required()
-            contents_key = ""
-        else:
-            api_key = exa_key_required()
-            contents_key = ""
-    else:
-        api_key = ""
-        contents_key = ""
+    api_key = deepseek_key_required() if pairs else ""
     new_queries, skipped = reserve_queries(work, [query for _qid, query in pairs])
     for query in skipped:
         print(f"skipped duplicate: {query}")
@@ -1231,14 +1230,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             remaining[query] -= 1
     if effective_pairs:
         note(f"searching: {len(effective_pairs)} queries with {args.workers} workers")
-        records, failures = _execute_queries(effective_pairs, args, api_key, provider)
-        if provider == "serper" and content_top > 0:
-            with sources_lock(work):
-                snapshot = load_registry(work / "sources.json", slug)
-            picked = content_fetch_items(records, snapshot, content_top)
-            if picked:
-                note(f"fetching page text for {len(picked)} url(s) via Exa /contents")
-                fetch_content_texts(picked, args.max_chars, contents_key, args.workers)
+        records, failures = _execute_queries(effective_pairs, questions, args, api_key)
     else:
         records, failures = [], 0
 
@@ -1248,7 +1240,9 @@ def cmd_search(args: argparse.Namespace) -> int:
             registry["topic"] = plan["topic"]
         before = {src["id"] for src in registry["sources"]}
         changes: list[dict] = []
-        new_ids, touched = merge_records(registry, records, changes)
+        new_ids, touched = merge_records(
+            registry, records, changes, work=work, text_chars=args.max_chars
+        )
         run_cost = sum(rec.get("cost") or 0.0 for rec in records)
         registry["cost_dollars"] = round(float(registry.get("cost_dollars") or 0.0) + run_cost, 6)
         write_json_atomic(work / "sources.json", registry)
@@ -1263,7 +1257,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 "new_ids": new_ids,
                 "matched_ids": touched,
                 "fetched_id": None,
-                "provider": provider,
+                "provider": "deepseek",
                 "cost": round(run_cost, 6),
                 "ok": not errors,
                 "error": "; ".join(errors) or None,
@@ -1277,7 +1271,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 "new_ids": change["new_ids"],
                 "matched_ids": change["matched_ids"],
                 "fetched_id": None,
-                "provider": provider,
+                "provider": "deepseek",
                 "cost": round(float(record.get("cost") or 0.0), 6),
                 "ok": bool(record.get("ok")),
                 "error": record.get("error"),
@@ -1286,18 +1280,14 @@ def cmd_search(args: argparse.Namespace) -> int:
     if adhoc:
         qid = args.subq
         picked = [src for src in registry["sources"] if src["id"] in set(touched)]
-        picked.sort(key=lambda s: int(s["id"][1:]))
+        picked = rank_sources(picked)
         print(f"ad-hoc results for {qid}: {len(picked)} sources ({len(new_ids)} new)")
         for src in picked:
             day = format_date(src.get("published"))
             suffix = f" ({day})" if day else ""
             print(f"\n[{src['id']}] {src.get('title') or '(untitled)'}{suffix}")
             print(f"    {src.get('url')}")
-            excerpt = ""
-            if src.get("highlights"):
-                excerpt = src["highlights"][0]
-            elif src.get("text"):
-                excerpt = re.sub(r"\s+", " ", src["text"])[:400]
+            excerpt = " ".join(str(src.get("summary") or src.get("text") or "").split())
             if excerpt:
                 print(f"    {excerpt[:400]}")
         written: list[str] = []
@@ -1305,7 +1295,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             with sources_lock(work):
                 registry = load_registry(work / "sources.json", slug)
                 written = [src["id"] for src in append_evidence(
-                    work / "evidence" / f"{qid}.md", qid, question, picked
+                    work / "evidence" / f"{qid}.md", qid, question, picked, work
                 )]
             if written:
                 print(f"\nevidence appended for {', '.join(written)}: {work / 'evidence' / (qid + '.md')}")
@@ -1324,7 +1314,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         per_q[qid] = len(picked)
         write_text_atomic(
             work / "evidence" / f"{qid}.md",
-            render_evidence(qid, item.get("question", ""), picked) + "\n",
+            render_evidence(qid, str(item.get("question") or ""), picked, work) + "\n",
         )
     ok = len(effective_pairs) - failures
     skipped_note = f", {len(skipped)} skipped duplicate(s)" if skipped else ""
@@ -1339,72 +1329,162 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 1 if ok == 0 and effective_pairs else 0
 
 
+def _fold_with_offsets(text: str) -> tuple[str, list[int]]:
+    """Fold *text* and map each folded character back to its original index."""
+    out: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(text):
+        folded = "".join(
+            part for part in unicodedata.normalize("NFKD", char.lower())
+            if not unicodedata.combining(part)
+        )
+        for part in folded:
+            out.append(part)
+            offsets.append(index)
+    offsets.append(len(text))
+    return "".join(out), offsets
+
+
+def grep_windows(text: str, terms: list[str], window: int = GREP_WINDOW,
+                 limit: int = GREP_MAX_WINDOWS) -> list[tuple[int, int, str]]:
+    """Case/accent-insensitive match windows (±window chars), merged when overlapping."""
+    folded, offsets = _fold_with_offsets(text)
+    spans: list[tuple[int, int]] = []
+    for term in terms:
+        needle = fold(term)
+        if not needle:
+            continue
+        start = folded.find(needle)
+        while start != -1:
+            end = start + len(needle)
+            spans.append((offsets[start], offsets[end - 1] + 1))
+            start = folded.find(needle, start + len(needle))
+    if not spans:
+        return []
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        begin = max(0, start - window)
+        finish = min(len(text), end + window)
+        if merged and begin <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], finish))
+        else:
+            merged.append((begin, finish))
+    return [(begin, finish, text[begin:finish]) for begin, finish in merged[:limit]]
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     work = require_work(args.work)
-    sid = args.id.strip()
-    if not re.match(r"^S[0-9]+$", sid):
-        die(f"error: --id must look like S12 (got {sid!r})", 2)
-    registry = load_registry(work / "sources.json", slug_from_work(work))
+    slug = slug_from_work(work)
+    registry = load_registry(work / "sources.json", slug)
+    subq = (args.subq or "").strip()
+    registered: dict | None = None
+    registered_new = False
+    if args.url:
+        if not subq:
+            die("error: --url requires --subq (the subquestion the page answers)", 2)
+        if not QID_RE.match(subq):
+            die(f"error: --subq must match ^q[0-9]+$ (got {args.subq!r})", 2)
+        registered, registered_new = register_url(work, slug, args.url, subq)
+        sid = registered["id"]
+    else:
+        sid = args.id.strip()
+        if not re.match(r"^S[0-9]+$", sid):
+            die(f"error: --id must look like S12 (got {sid!r})", 2)
+    registry = load_registry(work / "sources.json", slug)
     src = source_by_id(registry, sid)
     if src is None:
         die(f"error: unknown source id {sid} in {work / 'sources.json'}", 1)
     max_chars = max(500, int(args.max_chars))
-    note(f"fetching {sid}: {src['url']}")
-    provider = search_provider()
-    if provider == "deepseek":
-        api_key = deepseek_key_required()
-        fetcher = lambda: deepseek_fetch(src["url"], max_chars, api_key)
-        label = f"DeepSeek fetch {sid}"
-    else:
-        api_key = exa_key_required()
-        fetcher = lambda: exa_contents(src["url"], max_chars, api_key)
-        label = f"contents {sid}"
-    try:
-        page, cost = with_retries(fetcher, 3, label)
-    except HttpError as exc:
+    page_text = read_page(work, sid)
+    cost = 0.0
+    if page_text:
+        note(f"using cached page for {sid}: {page_path(work, sid)}")
+        cached = True
         append_log(work, {
-            "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-            "fetched_id": sid, "provider": provider, "cost": None, "ok": False, "error": str(exc),
+            "op": "fetch", "subq": subq or None, "queries": [],
+            "new_ids": [sid] if registered_new else [], "matched_ids": [sid],
+            "fetched_id": sid, "provider": "deepseek", "cost": 0.0,
+            "ok": True, "error": None, "cached": True,
         })
-        raise
-    text = str(page.get("text") or "")
-    with sources_lock(work):
-        registry = load_registry(work / "sources.json", slug_from_work(work))
-        stored = source_by_id(registry, sid)
-        if stored is not None and text:
-            stored["text"] = text
-        if stored is not None:
-            registry["cost_dollars"] = round(
-                float(registry.get("cost_dollars") or 0.0) + cost, 6
+    else:
+        cached = False
+        api_key = deepseek_key_required()
+        note(f"fetching {sid}: {src['url']}")
+        try:
+            page, cost = with_retries(
+                lambda: deepseek_fetch(src["url"], PAGE_MAX_CHARS, api_key), 3,
+                f"DeepSeek fetch {sid}",
             )
-        registry["updated"] = utcnow()
-        write_json_atomic(work / "sources.json", registry)
-    append_log(work, {
-        "op": "fetch", "subq": None, "queries": [], "new_ids": [], "matched_ids": [],
-        "fetched_id": sid, "provider": provider, "cost": round(cost, 6), "ok": True, "error": None,
-    })
-    print(f"[{sid}] {page.get('title') or src.get('title') or ''} — {src['url']}")
-    fallback = "(no text returned by DeepSeek fetch)" if provider == "deepseek" else "(no text returned by /contents)"
-    print(text or fallback)
+        except HttpError as exc:
+            append_log(work, {
+                "op": "fetch", "subq": subq or None, "queries": [], "new_ids": [],
+                "matched_ids": [], "fetched_id": sid, "provider": "deepseek",
+                "cost": None, "ok": False, "error": str(exc),
+            })
+            raise
+        page_text = str(page.get("text") or "")
+        store_page(work, sid, page_text)
+        with sources_lock(work):
+            registry = load_registry(work / "sources.json", slug)
+            stored = source_by_id(registry, sid)
+            if stored is not None:
+                if page_text:
+                    stored["text"] = page_text[:TEXT_MAX_CHARS]
+                if page.get("title") and not stored.get("title"):
+                    stored["title"] = page["title"]
+                registry["cost_dollars"] = round(
+                    float(registry.get("cost_dollars") or 0.0) + cost, 6
+                )
+            registry["updated"] = utcnow()
+            write_json_atomic(work / "sources.json", registry)
+        src = source_by_id(registry, sid) or src
+        append_log(work, {
+            "op": "fetch", "subq": subq or None, "queries": [],
+            "new_ids": [sid] if registered_new else [], "matched_ids": [sid],
+            "fetched_id": sid, "provider": "deepseek", "cost": round(cost, 6),
+            "ok": True, "error": None,
+        })
+    if registered_new and subq and page_text:
+        with sources_lock(work):
+            registry = load_registry(work / "sources.json", slug)
+            fresh = source_by_id(registry, sid)
+            if fresh is not None:
+                append_evidence(work / "evidence" / f"{subq}.md", subq,
+                                _subquestion_text(work, subq), [fresh], work)
+
+    print(f"[{sid}] {src.get('title') or ''} — {src['url']}")
+    print(f"page: {len(page_text)} chars · {'cached' if cached else 'fetched'}")
+    if not page_text:
+        print("(no text returned by DeepSeek fetch)")
+        return 0
+    terms = [term for term in (args.grep or []) if str(term).strip()]
+    if not terms:
+        print(page_text[:max_chars])
+        return 0
+    windows = grep_windows(page_text, terms)
+    if not windows:
+        print(f"no matches for: {', '.join(terms)}")
+        return 1
+    for index, (begin, end, text) in enumerate(windows, 1):
+        print(f"\n--- match {index} @{begin}..{end} ---")
+        print(text)
+    print(f"\n{len(windows)} window(s) for: {', '.join(terms)}")
     return 0
 
 
-SPANISH_HINTS = frozenset("""
-de la que el en los se del las un por con no una su para es al lo como mas pero sus le ya o
-este si porque esta entre cuando muy sin sobre tambien me hasta hay donde quien desde todo nos
-durante todos uno les ni contra otros ese eso ante ellos e esto mi antes algunos que unos yo
-otro otras otra el tanto esa estos mucho quienes nada muchos cual poco ella estar estas algunas
-algo nosotros mi mis tu te ti tus ellas nosotras vosotros vosotras os mio mia mios mias tuyo
-tuya tuyos tuyas suyo suya suyos suyas nuestro nuestra nuestros nuestras vuestro vuestra
-""".split())
-ENGLISH_HINTS = frozenset("""
-the of and to in a is that for it as was with be by on not he i this are or his from at which
-but have an they you were her she there one all we their has had what would will can been when
-who more no if out so said up its about into than them only other some could time these two
-may then do first any my now such like our over man me even most made after also did many off
-before must through back years where much your way well down should because each just those
-people how too little state good very make world still own see men work long get here between
-""".split())
+def _subquestion_text(work: Path, qid: str) -> str:
+    plan_path = work / "plan.json"
+    if not plan_path.exists():
+        return ""
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    for item in plan.get("subquestions") or []:
+        if isinstance(item, dict) and item.get("id") == qid:
+            return str(item.get("question") or "")
+    return ""
 
 
 def detect_language(text: str) -> str:
@@ -1420,9 +1500,7 @@ def _word_count(text: str) -> int:
 
 
 def _normalize_heading(text: str) -> str:
-    import unicodedata
-    folded = unicodedata.normalize("NFKD", text.lower())
-    folded = "".join(char for char in folded if not unicodedata.combining(char))
+    folded = fold(text)
     return re.sub(r"\s+", " ", folded).strip()
 
 
@@ -1525,6 +1603,8 @@ NUMBER_RE = re.compile(r"\d[\d.,]*\d|\d")
 COMPUTED_RE = re.compile(r"≈|c[áa]lculo|calculat|estimad|estimat|supuesto|assum", re.IGNORECASE)
 SUPPORT_SKIP_SECTIONS = ("supuestos", "assumptions", "metodologia", "methodology")
 SUPPORT_WARN_LIMIT = 25
+WEAK_SECTIONS = ("resumen", "summary", "que hacer", "what to do")
+WEAK_WARN_LIMIT = 10
 
 
 def _number_keys(text: str) -> set[str]:
@@ -1538,14 +1618,12 @@ def _number_keys(text: str) -> set[str]:
 
 
 def _citation_units(text: str):
-    """Yield (lineno, unit_text, cited_ids) for each sentence or table cell that cites sources."""
+    """Yield (lineno, section, unit_text, cited_ids) for each sentence or table cell with a citation."""
     section = ""
     for lineno, line in enumerate(text.splitlines(), 1):
         stripped = line.strip()
         if stripped.startswith("#"):
             section = _normalize_heading(stripped.lstrip("#"))
-            continue
-        if any(section.startswith(name) for name in SUPPORT_SKIP_SECTIONS):
             continue
         if stripped.startswith("|"):
             units = [cell for cell in stripped.strip("|").split("|")]
@@ -1556,7 +1634,7 @@ def _citation_units(text: str):
             for match in CITE_RE.finditer(unit):
                 ids.extend(part.strip() for part in match.group(1).split(","))
             if ids:
-                yield lineno, unit, ids
+                yield lineno, section, unit, ids
 
 
 def _citation_support_warnings(text: str, by_id: dict) -> list[str]:
@@ -1566,13 +1644,15 @@ def _citation_support_warnings(text: str, by_id: dict) -> list[str]:
     def source_keys(sid: str) -> set[str]:
         if sid not in cache:
             src = by_id.get(sid) or {}
-            blob = " ".join([str(src.get("title") or ""), str(src.get("text") or "")]
-                            + [str(h) for h in (src.get("highlights") or [])])
+            blob = " ".join([str(src.get("title") or ""), str(src.get("text") or ""),
+                             str(src.get("summary") or "")])
             cache[sid] = _number_keys(blob)
         return cache[sid]
 
     problems = []
-    for lineno, unit, ids in _citation_units(text):
+    for lineno, section, unit, ids in _citation_units(text):
+        if any(section.startswith(name) for name in SUPPORT_SKIP_SECTIONS):
+            continue
         if COMPUTED_RE.search(unit):
             continue
         claim = CITE_RE.sub(" ", unit)
@@ -1592,6 +1672,28 @@ def _citation_support_warnings(text: str, by_id: dict) -> list[str]:
         )
     if len(problems) > SUPPORT_WARN_LIMIT:
         warnings.append(f"  ... and {len(problems) - SUPPORT_WARN_LIMIT} more")
+    return warnings
+
+
+def _weak_source_warnings(text: str, by_id: dict) -> list[str]:
+    """Summary/What-to-do sentences whose only citations are weak sources."""
+    problems = []
+    for lineno, section, unit, ids in _citation_units(text):
+        if not any(section.startswith(name) for name in WEAK_SECTIONS):
+            continue
+        if any(not source_quality_tags(by_id.get(sid) or {}) for sid in ids):
+            continue
+        problems.append((lineno, ids, CITE_RE.sub(" ", unit).strip()))
+    if not problems:
+        return []
+    warnings = [
+        f"warning: {len(problems)} Summary/What-to-do sentence(s)/cell(s) cite only "
+        "social/forum or low-authority sources:"
+    ]
+    for lineno, ids, claim in problems[:WEAK_WARN_LIMIT]:
+        warnings.append(f"  line {lineno}: {', '.join(ids)}: {claim[:140]}")
+    if len(problems) > WEAK_WARN_LIMIT:
+        warnings.append(f"  ... and {len(problems) - WEAK_WARN_LIMIT} more")
     return warnings
 
 
@@ -1706,6 +1808,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         )
     warnings.extend(_date_warnings(text))
     warnings.extend(_citation_support_warnings(text, by_id))
+    warnings.extend(_weak_source_warnings(text, by_id))
     for warning in warnings:
         note(warning)
 
@@ -1765,6 +1868,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
 CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
 DATE_STATUS_VALUES = frozenset({"open", "past", "unknown"})
+AS_OF_RE = re.compile(r"^(?:unknown|\d{4}-\d{2}(?:-\d{2})?)$")
 
 
 def validate_finding(data, qid: str = "") -> list[str]:
@@ -1803,6 +1907,14 @@ def validate_finding(data, qid: str = "") -> list[str]:
             errors.append(f"{where}.verified must be true or false")
         if "date_status" in item and item.get("date_status") not in DATE_STATUS_VALUES:
             errors.append(f"{where}.date_status must be open, past or unknown")
+        if "as_of" in item:
+            as_of = item.get("as_of")
+            if not isinstance(as_of, str) or not AS_OF_RE.match(as_of.strip()):
+                errors.append(f"{where}.as_of must be YYYY-MM, YYYY-MM-DD or unknown")
+        if "unit" in item:
+            unit = item.get("unit")
+            if not isinstance(unit, str) or not unit.strip():
+                errors.append(f"{where}.unit must be a non-empty string")
     for field in ("contradictions", "gaps"):
         values = data.get(field)
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
@@ -1835,6 +1947,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     registry = load_registry(work / "sources.json", slug)
     count = len(registry["sources"])
     print(f"sources:   [{'x' if count else ' '}] {count} unique (cost ${float(registry.get('cost_dollars') or 0):.4f})")
+    pages = len(list((work / PAGES_DIR).glob("S*.md"))) if (work / PAGES_DIR).is_dir() else 0
+    print(f"pages:     [{'x' if pages else ' '}] {pages} cached full page(s)")
 
     qids = [str(item.get("id")) for item in subquestions if item.get("id")]
     evidence = [qid for qid in qids if (work / "evidence" / f"{qid}.md").exists()]
@@ -1900,14 +2014,14 @@ def cmd_status(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="research.py",
-        description="Deterministic deep-research pipeline helper (Exa/Serper/DeepSeek + local files).",
+        description="Deterministic deep-research pipeline helper (DeepSeek Search & Fetch + local files).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Typical flow:\n"
             "  research.py init --slug 2026-11-15-topic\n"
             "  research.py search --work ~/research/.work/2026-11-15-topic\n"
             "  research.py search --work DIR --subq q3 --query 'follow-up query'\n"
-            "  research.py fetch --work DIR --id S12\n"
+            "  research.py fetch --work DIR --id S12 --grep 'tariff'\n"
             "  research.py finalize --work DIR --draft DIR/draft.md --out ~/research/topic.md\n"
             "  research.py status --work DIR\n"
         ),
@@ -1930,14 +2044,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--num-results", type=int, default=None,
                           help=f"results per query (default ${NUM_RESULTS_ENV} or {DEFAULT_NUM_RESULTS})")
     p_search.add_argument("--max-chars", type=int, default=None,
-                          help=f"page text characters per source (default ${MAX_CHARS_ENV} or {DEFAULT_MAX_CHARS})")
+                          help=f"page text kept per source in sources.json (default ${MAX_CHARS_ENV} or {DEFAULT_MAX_CHARS})")
     p_search.add_argument("--dry-run", action="store_true", help="validate plan.json and print the query count; no API calls")
     p_search.set_defaults(func=cmd_search)
 
-    p_fetch = sub.add_parser("fetch", help="fetch full page text for a known source id")
+    p_fetch = sub.add_parser("fetch", help="print a cached page, or fetch one; --grep finds values")
     p_fetch.add_argument("--work", required=True, help="work dir (from init)")
-    p_fetch.add_argument("--id", required=True, help="source id, e.g. S12")
-    p_fetch.add_argument("--max-chars", type=int, default=20000, help="max characters (default 20000)")
+    target = p_fetch.add_mutually_exclusive_group(required=True)
+    target.add_argument("--id", help="source id, e.g. S12")
+    target.add_argument("--url", help="URL not in sources.json yet; registered as a new S-id")
+    p_fetch.add_argument("--subq", help="subquestion id; required with --url")
+    p_fetch.add_argument("--max-chars", type=int, default=20000,
+                         help="characters printed without --grep (default 20000)")
+    p_fetch.add_argument("--grep", action="append", metavar="TERM",
+                         help="print ±400-char windows around each match (repeatable)")
     p_fetch.set_defaults(func=cmd_fetch)
 
     p_final = sub.add_parser("finalize", help="validate citations, renumber, add References")
