@@ -132,10 +132,14 @@ Rules:
   `site:gob.pe tarifa electrica`), (d) when the user is in a specific country and the
   subquestion involves prices, availability, shops, providers or regulation, one local-market
   query with the country TLD (e.g. `site:.pe precio balon gas`), (e) one adversarial phrasing
-  (`criticism`, `risks`, `limitations`, `failed`). Never repeat the same query twice.
+  (`criticism`, `risks`, `limitations`, `failed`), (f) for any subquestion with prices, fees,
+  tariffs, deadlines or availability, one query naming the current month and year in the
+  user's language (e.g. `tarifa luz noviembre 2026`, `precio balon gas noviembre 2026`) to
+  catch recent news. Never repeat the same query twice.
 - Operators that work in DeepSeek search: `site:`, `-site:`, `"exact phrase"`, `lang:`,
   `after:`. Use `after:` only for news-type queries, never together with `lang:` (that
-  combination returns nothing), and remember it drops undated official documents.
+  combination returns nothing), and remember it drops undated official documents. Do not use
+  `after:` to get freshness: name the current month and year instead.
 
 Filled-in example (3 of 4+ subquestions shown):
 
@@ -224,8 +228,11 @@ context: |
 
   STEP 1 — Read <WORK>/evidence/<QID>.md (a digest of candidate sources with stable S-ids).
   It quotes the passages of each page that best match this subquestion, and lists weaker
-  candidates as one-liners you can still fetch. The tags `social/forum` and `low-authority`
-  mark weak sources: use them as leads, never as the only support for a number.
+  candidates as one-liners you can still fetch. Sources are ranked by DeepSeek rerank plus a
+  recency bonus (a 90-day-old page gets +0.6, an old undated PDF can get -0.5), so an official
+  2021 PDF does not outrank this month's notice. The tags `social/forum`, `low-authority` and
+  `possibly-outdated` mark weak sources: use them as leads, never as the only support for a
+  number, and check freshness with `recent --grep` before using a value.
 
   STEP 2 — Follow-up research: at most 6 search calls. Fetch at least 3 and at most 8 pages
   total (fetch is cheap — cached pages are free):
@@ -243,9 +250,13 @@ context: |
         `no matches` means the value is NOT on that page: fix the source or drop the claim.
     (b) record the unit and pack size exactly as the page states it — per unit, per box of N,
         per month, currency, incl./excl. tax — in the claim and in the `unit` field.
-    (c) run one freshness search for a newer or superseding version (e.g. "<thing> vigente",
-        "<thing> <current year>", the official issuer's site) and use the newest official
-        value, recording its `as_of` date. An older official PDF is not the current value.
+    (c) freshness check before accepting the value: run
+        `python3 ${HERMES_SKILL_DIR}/scripts/research.py recent --work <WORK> --grep "<thing>" "<unit>"`
+        (local, no request) and read the newest rows. If a newer source reports a change, fetch
+        it (`--grep` the value) and use the newest official value, recording its `as_of` date.
+        If nothing newer is registered, run one search naming the current month and year (e.g.
+        "tarifa luz noviembre 2026"). An older official PDF is not the current value, however
+        high its authority or rerank score.
     (d) if the only source is tagged social/forum or low-authority, corroborate it with a
         second independent source or set `confidence` to "low".
   Prefer authority >= 3 and official/primary pages. A forum post, Q&A page, social media,
@@ -329,13 +340,18 @@ synthesize. Do not skip it silently.
    - asks in `plan.json` whose coverage is thin: no number where a number is needed, one weak
      source, or only social/forum/low-authority support.
 2. Pick the top ≤8 items by how much they change the answer; skip cosmetic ones.
-3. For each item run at most 2 targeted calls YOURSELF:
+3. Staleness audit (mandatory): for every value that will appear in Summary or What to do,
+   run `python3 ${HERMES_SKILL_DIR}/scripts/research.py recent --work <WORK> --grep "<value>" "<thing>"`
+   and read the newest rows. If a newer source contradicts the finding, fetch it and resolve
+   the conflict (update `claim`, `source_ids`, `as_of`) before synthesis. Recency beats
+   formality for "the current value": an old official PDF loses to this month's notice.
+4. For each item run at most 2 targeted calls YOURSELF:
    `python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "..."`
    and/or `fetch --work <WORK> --id S# --grep "value"` (or `fetch --url ... --subq <QID>`).
-4. Append the result to the relevant `<WORK>/findings/<qid>.json`: a new finding, or a
+5. Append the result to the relevant `<WORK>/findings/<qid>.json`: a new finding, or a
    corrected one (fix `claim`, `source_ids`, `confidence`, `verified`, `as_of`, `unit`).
    Keep the file valid JSON.
-5. If nothing qualifies, say "no gap round needed" and go on.
+6. If nothing qualifies, say "no gap round needed" and go on.
 
 Then synthesize from the updated findings.
 
@@ -374,7 +390,9 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    them in a markdown table (one row per option, one column per attribute, citations inside
    the cells) and keep the prose around it to 1-3 sentences that say what the table means.
    Do not pad: a typical report is 4,000-7,000 words. Do not leave HTML comments in the body. Do
-   not add a References heading — `finalize` adds the localized one.
+   not add a References heading — `finalize` adds the localized one. Sources appear ONLY as
+   citation brackets (`[S12]`, `[S3, S7]`), in tables and prose alike: never write a bare `S12`
+   anywhere, because it is not a citation and `finalize` rejects it.
 6. Before finalizing, re-read the whole draft once and fix these six things:
    - **Cite the right source.** A number or proper name next to `[S#]` must appear in S#'s
      text. If it came from another source, cite that one; if you cannot find it, move it to
@@ -415,6 +433,8 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
   (`python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK> --subq <QID> --query "..."`),
   then cite the new id. Never invent a replacement id.
 - `error: the draft contains no citations` → rewrite with citations.
+- `error: the draft mentions source ids outside a citation bracket` → the listed lines have a
+  bare `S476` (often a table column). Change each to `[S476]`, or drop the text.
 - `error: the draft is missing required sections` → add the listed sections in the report
   language (`Summary`/`Resumen`, `What to do`/`Qué hacer`, `Not verified`/`No verificado`)
   and re-run.
@@ -513,7 +533,8 @@ skipped as duplicates), and `finalize` is repeatable.
   request, so 20 costs the same as 8), 6000 chars per source in `sources.json` plus the full
   page cached in `pages/`.
 - Per subquestion researcher: max 6 follow-up search calls (≤3 queries each) and 3-8 fetched
-  pages. Cached pages cost nothing, so fetch aggressively.
+  pages. Cached pages cost nothing, so fetch aggressively. `recent` is local and free: use it
+  for every freshness check.
 - Typical run: 24-48 searches in step 3 plus ≤48 follow-ups and ≤8 gap-round searches. At
   $0.00075 per request that is about $0.10 per report. The script prints run and cumulative
   `cost` — include it in `## Methodology` when it is above $0.10.
