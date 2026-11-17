@@ -1,4 +1,4 @@
-"""Unit tests for the eval runner's Exa budget accounting and run ordering."""
+"""Unit tests for the eval runner's search budget accounting and run ordering."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ def load_runner():
     return module
 
 
-def write_stats(run_dir: Path, exa: float) -> None:
+def write_stats(run_dir: Path, search_usd: float) -> None:
     run_dir.mkdir(parents=True)
     (run_dir / "stats.json").write_text(
-        json.dumps({"exa_cost_usd": exa, "status": "ok"}), encoding="utf-8"
+        json.dumps({"exa_cost_usd": search_usd, "status": "ok"}), encoding="utf-8"
     )
 
 
