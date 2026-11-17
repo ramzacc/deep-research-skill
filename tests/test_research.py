@@ -1096,7 +1096,7 @@ def test_dedupe_highlights_and_cost(tmp_path, monkeypatch, capsys):
     assert shared["text"] == "Full content one."
     assert shared["published"] == "2025-03-04T10:00:00Z"
     assert "authority" not in shared
-    assert "rerank" not in shared
+    assert shared["rerank"] == 2.0  # first result: position-based score
     # two searches: cost comes from each response's costDollars.total
     assert registry["cost_dollars"] == pytest.approx(2 * SEARCH_COST)
     assert "run cost: $0.0100" in out

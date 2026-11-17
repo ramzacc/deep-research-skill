@@ -468,7 +468,7 @@ def exa_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], 
     if not isinstance(raw, list):
         raw = []
     results: list[dict] = []
-    for item in raw:
+    for position, item in enumerate(raw):
         if not isinstance(item, dict):
             continue
         url = str(item.get("url") or "").strip()
@@ -484,6 +484,8 @@ def exa_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], 
             "publishedDate": item.get("publishedDate") or "",
             "summary": summary,
             "content": str(item.get("text") or "")[:PAGE_MAX_CHARS],
+            # Exa returns no score; keep its relevance order on DeepSeek's 0-3 rerank scale.
+            "rerank": round(max(0.5, 2.0 - 0.1 * position), 2),
         })
     return results, _cost_dollars(data)
 
