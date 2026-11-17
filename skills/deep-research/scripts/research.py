@@ -56,6 +56,8 @@ IDENTIFY_Q1_RE = re.compile(
 )
 CITE_RE = re.compile(r"\[(S[0-9]+(?:\s*,\s*S[0-9]+)*)\]")
 CITE_LINK_RE = re.compile(r"\[\[[0-9]+\]\]\(")
+BARE_ID_LIST_RE = re.compile(r"\bS[0-9]+(?:\s*[,;/]\s*S[0-9]+)+\b")
+BARE_ID_CELL_RE = re.compile(r"^\s*S[0-9]+\s*$")
 MAX_PARAGRAPH_CITATION_WARN = 0.60
 
 # Test-only knobs (documented in README.md). Never set these in production.
@@ -1348,11 +1350,18 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         die(f"error: cannot read draft {draft_path}: {exc}", 2)
     language = getattr(args, "lang", None) or detect_language(text)
 
+    # Leaked ids look like "S476, S450" or a table cell holding only ids; a single id-like
+    # token in prose ("Galaxy S23") is left alone.
     bare: list[tuple[str, int]] = []
     for lineno, line in enumerate(text.splitlines(), 1):
-        for match in re.finditer(r"\bS[0-9]+\b", CITE_RE.sub("", line)):
-            if match.group(0) in by_id:
-                bare.append((match.group(0), lineno))
+        stripped = CITE_RE.sub("", line)
+        spans = [m.group(0) for m in BARE_ID_LIST_RE.finditer(stripped)]
+        if stripped.lstrip().startswith("|"):
+            spans += [cell for cell in stripped.split("|") if BARE_ID_CELL_RE.match(cell)]
+        for span in spans:
+            for sid in re.findall(r"S[0-9]+", span):
+                if sid in by_id:
+                    bare.append((sid, lineno))
     if bare:
         note("error: the draft contains bare source ids. Cite them as [S#] or remove the text:")
         by_line: dict[int, list[str]] = {}

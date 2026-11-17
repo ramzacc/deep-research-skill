@@ -680,6 +680,29 @@ def test_finalize_rejects_bare_source_ids(tmp_path, capsys):
     assert "S3" in events[-1]["error"]
 
 
+def test_finalize_bare_ids_only_flag_lists_and_id_cells(tmp_path, capsys):
+    work = make_work(tmp_path, plan_of(("q1", ["a"])))
+    write_registry(work, [
+        source("S1", "https://one.example/a"),
+        source("S3", "https://three.example/c"),
+    ])
+    draft = work / "draft.md"
+    body = "# Title\n\n## Resumen\n\nThe Galaxy S3 phone is old [S1].\n\n## Qué hacer\n\n## No verificado\n"
+    draft.write_text(body, encoding="utf-8")
+    out = tmp_path / "f.md"
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 0, err
+
+    draft.write_text(body + "\n| Item | Source |\n| A | S3 |\n", encoding="utf-8")
+    code, _stdout, err = run_cli(
+        ["finalize", "--work", str(work), "--draft", str(draft), "--out", str(out)], capsys
+    )
+    assert code == 1
+    assert "S3" in err
+
+
 def test_finalize_ignores_bare_tokens_that_are_not_known_ids(tmp_path, capsys):
     work = make_finalize_work(tmp_path)
     draft = work / "draft.md"
