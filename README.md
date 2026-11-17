@@ -1,9 +1,14 @@
 # deep-research
 
-A [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill that runs ChatGPT/Gemini-style
-deep research end to end: decompose the question, search broadly in parallel, delegate one
-researcher per subquestion, close the remaining gaps, merge the findings into a cited markdown
-report, and send it to you on Telegram as a document.
+A [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill that runs deep research end
+to end as an exploration and reporting tool: decompose the question, search broadly in parallel,
+delegate one researcher per subquestion, close the remaining gaps, and merge the findings into a
+cited markdown report and send it to you on Telegram as a document.
+
+It maps the landscape and reports the evidence: what sources say, how strong that evidence is,
+and the trade-offs between the options. It does not make the decision for you: no recommendation,
+no ranking of "best", no step-by-step action plan. If you ask "which should I choose", it lays
+out what the evidence supports on each side and what would tip the balance.
 
 The reasoning lives in a rigid checklist (`SKILL.md`); the deterministic parts live in one
 stdlib-only Python script, so a small model can follow the pipeline without improvising. Search
@@ -94,13 +99,17 @@ which step to continue from.
    searches/fetches, must verify every price/deadline/requirement on the page with
    `fetch --grep`, and writes `<work>/findings/<qid>.json`. Results arrive asynchronously; the
    agent resumes from disk with `status`.
-5. The agent runs a gap round: gaps, contradictions and weak decision-critical findings get
-   up to 2 targeted searches/fetches each, appended to the findings.
-6. The agent synthesizes `draft.md` from `templates/report.md`.
-7. `research.py finalize` validates every citation, renumbers them `[1]`, `[2]`, ... in order
-   of first appearance, turns them into clickable links, appends `## References`, and warns
-   about numbers missing from their cited page, past deadlines, and Summary/What-to-do claims
-   supported only by social/forum or low-authority sources.
+5. The agent runs a gap round: gaps, contradictions and weak value-bearing findings get up to
+   2 targeted searches/fetches each, appended to the findings; a staleness audit re-checks every
+   value that will appear in the Summary or a comparison table.
+6. The agent synthesizes `draft.md` from `templates/report.md`: Summary, 3-7 thematic sections,
+   Debates and evidence strength, Implications, Open questions, Not verified, and Assumptions
+   only when it computes something.
+7. `research.py finalize` requires Summary, Implications and Not verified, validates every
+   citation, renumbers them `[1]`, `[2]`, ... in order of first appearance, turns them into
+   clickable links, appends `## References`, and warns about numbers missing from their cited
+   page, dates that have passed, and Summary/Implications claims supported only by social/forum
+   or low-authority sources.
 8. The agent runs every `post_actions` item from `plan.json` (for example, updating a
    task with the summary and report path).
 9. The reply ends with `MEDIA:/abs/path/<slug>.md` and confirms each post-action.
