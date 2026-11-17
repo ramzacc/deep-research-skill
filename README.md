@@ -2,11 +2,13 @@
 
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) skill that runs ChatGPT/Gemini-style
 deep research end to end: decompose the question, search broadly in parallel, delegate one
-researcher per subquestion, merge the findings into a cited markdown report, and send it to you
-on Telegram as a document.
+researcher per subquestion, close the remaining gaps, merge the findings into a cited markdown
+report, and send it to you on Telegram as a document.
 
 The reasoning lives in a rigid checklist (`SKILL.md`); the deterministic parts live in one
-stdlib-only Python script, so a small model can follow the pipeline without improvising.
+stdlib-only Python script, so a small model can follow the pipeline without improvising. Search
+and page fetching use DeepSeek's Search & Fetch API ($0.00075 per successful request, flat
+regardless of result count).
 
 ## Install
 
@@ -31,8 +33,7 @@ hermes skills update deep-research
 
 | Requirement | Why |
 |---|---|
-| `DEEP_RESEARCH_EXA_KEY` | search + page fetching (the skill calls Exa's REST API directly) |
-| `DEEP_RESEARCH_DEEPSEEK_KEY` (optional) | search + page fetching when `DEEP_RESEARCH_SEARCH_PROVIDER=deepseek` |
+| `DEEP_RESEARCH_DEEPSEEK_KEY` | search + page fetching (the skill calls DeepSeek's Search & Fetch API directly) |
 | `terminal` toolset enabled | runs `research.py` |
 | Python 3.10+ | the script is stdlib-only |
 | `delegate_task` (optional but recommended) | parallel per-subquestion researchers |
@@ -40,20 +41,12 @@ hermes skills update deep-research
 Set the key on the machine that runs Hermes:
 
 ```bash
-hermes config set DEEP_RESEARCH_EXA_KEY <your-exa-key>
+hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <your-deepseek-key>
 ```
 
-Use the same value as `EXA_API_KEY`. `EXA_API_KEY` alone is not enough: Hermes treats it as a
-web-provider credential and strips it from the terminal sandbox (and refuses to pass it through
-even when a skill declares it). `DEEP_RESEARCH_EXA_KEY` is a normal skill-declared variable, so
-Hermes registers it for the terminal after the skill loads. A running gateway picks up the new
-value on the next turn; start a new CLI chat after setting it.
-
-Declared skill variables are passed to the terminal sandbox by Hermes; Hermes-managed provider
-credentials are not.
-
-To use DeepSeek instead of Exa, set `DEEP_RESEARCH_SEARCH_PROVIDER=deepseek` and
-`hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`; `DEEP_RESEARCH_EXA_KEY` is then unused.
+`DEEP_RESEARCH_DEEPSEEK_KEY` is a normal skill-declared variable, so Hermes registers it for the
+terminal after the skill loads. A running gateway picks up the new value on the next turn; start
+a new CLI chat after setting it.
 
 Recommended delegation setting in `~/.hermes/config.yaml` so a full batch runs at once:
 
@@ -82,7 +75,7 @@ Outputs:
 
 ```
 ~/research/<slug>.md              final report, numbered linked citations + References
-~/research/.work/<slug>/          plan.json, sources.json, evidence/, findings/, draft.md
+~/research/.work/<slug>/          plan.json, sources.json, pages/, evidence/, findings/, draft.md
 ```
 
 The work dir is the resume state: if the agent or the gateway restarts, `status` shows exactly
@@ -91,18 +84,26 @@ which step to continue from.
 ## What happens under the hood
 
 1. `research.py init` creates the work dir.
-2. The agent writes `plan.json`: 4-8 subquestions, 3-5 diverse queries each.
+2. The agent writes `plan.json`: 4-8 subquestions, 4-6 diverse queries each (plain, synonym,
+   official `site:`, local-market `site:.tld` when the topic is local, adversarial).
 3. `research.py search` runs every query in parallel, dedupes URLs, assigns stable `S#` ids,
-   and writes one evidence digest per subquestion.
-4. One `delegate_task` call spawns one researcher per subquestion. Each may run a few
-   follow-up searches/fetches and writes `<work>/findings/<qid>.json`. Results arrive
-   asynchronously; the agent resumes from disk with `status`.
-5. The agent synthesizes `draft.md` from `templates/report.md`.
-6. `research.py finalize` validates every citation, renumbers them `[1]`, `[2]`, ... in order
-   of first appearance, turns them into clickable links, and appends `## References`.
-7. The agent runs every `post_actions` item from `plan.json` (for example, updating a
+   caches each full page in `<work>/pages/<S#>.md`, and writes one evidence digest per
+   subquestion: the best-ranked sources in full (with query-relevant passages) and the rest as
+   one-liners.
+4. One `delegate_task` call spawns one researcher per subquestion. Each may run follow-up
+   searches/fetches, must verify every price/deadline/requirement on the page with
+   `fetch --grep`, and writes `<work>/findings/<qid>.json`. Results arrive asynchronously; the
+   agent resumes from disk with `status`.
+5. The agent runs a gap round: gaps, contradictions and weak decision-critical findings get
+   up to 2 targeted searches/fetches each, appended to the findings.
+6. The agent synthesizes `draft.md` from `templates/report.md`.
+7. `research.py finalize` validates every citation, renumbers them `[1]`, `[2]`, ... in order
+   of first appearance, turns them into clickable links, appends `## References`, and warns
+   about numbers missing from their cited page, past deadlines, and Summary/What-to-do claims
+   supported only by social/forum or low-authority sources.
+8. The agent runs every `post_actions` item from `plan.json` (for example, updating a
    task with the summary and report path).
-8. The reply ends with `MEDIA:/abs/path/<slug>.md` and confirms each post-action.
+9. The reply ends with `MEDIA:/abs/path/<slug>.md` and confirms each post-action.
 
 Manual commands (same as the skill uses):
 
@@ -112,6 +113,8 @@ python3 skills/deep-research/scripts/research.py search --work ~/research/.work/
 python3 skills/deep-research/scripts/research.py search --work ~/research/.work/2026-11-15-heat-pumps
 python3 skills/deep-research/scripts/research.py search --work DIR --subq q3 --query "follow-up"
 python3 skills/deep-research/scripts/research.py fetch --work DIR --id S12
+python3 skills/deep-research/scripts/research.py fetch --work DIR --id S12 --grep "5.699" --grep "tarifa"
+python3 skills/deep-research/scripts/research.py fetch --work DIR --url https://example.com/doc --subq q3
 python3 skills/deep-research/scripts/research.py finalize --work DIR --draft DIR/draft.md --out ~/research/slug.md
 python3 skills/deep-research/scripts/research.py status --work DIR
 ```
@@ -121,23 +124,33 @@ reported and skipped so the run continues. Concurrent ad-hoc searches are safe: 
 merged under an exclusive `flock` with atomic replacement, so parallel researchers never
 duplicate ids or lose sources.
 
-`--num-results` defaults to 8, or to `DEEP_RESEARCH_NUM_RESULTS` when the flag is omitted.
+`fetch` prints the cached page when one exists (no network, no cost) and otherwise fetches it
+once, caching it in `pages/`. `--grep TERM` prints ±400-character windows around every match
+with character offsets, so a number can be confirmed on a 50k-character page; it exits 1 with
+`no matches` when the term is not there. `fetch --url` registers a URL that search missed as a
+new `S#` and appends it to that subquestion's evidence.
+
+`--num-results` defaults to 20, or to `DEEP_RESEARCH_NUM_RESULTS` when the flag is omitted.
+Search is billed per request, not per result, so 20 results cost the same as 8.
 Each work dir also gets `log.jsonl`: one JSON line per `search_batch`, `search_adhoc`, `fetch`
 and `finalize` operation (query, new/matched source ids, cost, ok/error), appended under the
 same lock. `final.json` records the final `S#` → reference-number mapping and the paragraph
 citation coverage.
 
+`DEEP_RESEARCH_MAX_CHARS` (default 6000) caps the short text kept per source in
+`sources.json`; the full page always lives in `pages/<S#>.md`.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `DEEP_RESEARCH_EXA_KEY is not set` | run `hermes config set DEEP_RESEARCH_EXA_KEY <key>`, then re-run |
-| `DEEP_RESEARCH_DEEPSEEK_KEY is not set` | provider is `deepseek`; run `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>` |
-| `HTTP 401/403` | invalid/expired search-provider key |
+| `DEEP_RESEARCH_DEEPSEEK_KEY is not set` | run `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`, then re-run |
+| `HTTP 401/403` | invalid/expired DeepSeek key |
 | `HTTP 402` | insufficient DeepSeek balance; top up the account |
-| `HTTP 429` after retries | provider rate limit; lower `--workers` (default 8) or retry later |
+| `HTTP 429/5xx` after retries | provider rate limit; lower `--workers` (default 8) or retry later |
 | `plan.json is invalid` | the error lists exact fields; validate with `search --dry-run` |
 | `unknown source ids` from `finalize` | the draft cites an id that is not in `sources.json`; remove the claim or search for real evidence — never invent ids |
+| `no matches for: ...` from `fetch --grep` | the value is not on that page; do not cite it from that source |
 | Research stops mid-run | ask "continue the research"; the agent runs `status` and resumes from the work dir |
 | Researchers return no findings / their terminal commands are denied | subagents auto-deny approval prompts by default; set `hermes config set delegation.subagent_auto_approve true` and restart the gateway |
 | Hub install misses a file | `SKILL.md` must literally reference every bundled path; both are referenced |
@@ -152,28 +165,20 @@ python3 -m pytest -q tests
 Tests are fully offline. The HTTP layer is replaced by a JSON fixture selected with the
 **test-only** environment variables:
 
-- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake Exa `/search`, Exa `/contents`,
-  Serper `/search` and DeepSeek `/tools/search` + `/tools/fetch` responses
-  (`endpoint: "serper"` / `"deepseek"`; supports status codes, per-route response
-  sequences, and artificial `delay`).
+- `DEEP_RESEARCH_MOCK=/path/to/fixture.json` — routes fake DeepSeek `/tools/search` and
+  `/tools/fetch` responses (`contains` matches the query or URL; supports status codes,
+  per-route response sequences, and artificial `delay`), with an optional `default_deepseek`.
 - `DEEP_RESEARCH_BACKOFF_BASE=0` — disables retry sleeps in tests.
 
 Production knobs:
 
-- `DEEP_RESEARCH_EXA_KEY` — the Exa key used by the scripts (falls back to `EXA_API_KEY`).
-- `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 8; `--num-results` wins).
-- `DEEP_RESEARCH_MAX_CHARS` — page-text characters per source (default 6000; `--max-chars` wins).
-- `DEEP_RESEARCH_SEARCH_PROVIDER` — `exa` (default), `serper` or `deepseek`. Serper mode
-  searches Google via Serper, stores the snippet as each source's highlight, then fetches
-  page text for the top new results with Exa `/contents`. DeepSeek mode uses DeepSeek's
-  Search & Fetch API for both, at $0.00075 per successful request; `site:` operators stay
-  in the query and authority/rerank scores are kept when returned.
-- `DEEP_RESEARCH_SERPER_KEY` — Serper API key; required when the provider is `serper`.
-- `DEEP_RESEARCH_DEEPSEEK_KEY` — DeepSeek API key; required when the provider is
-  `deepseek`. No Exa key is needed in that mode.
-- `DEEP_RESEARCH_EXA_TYPE` — Exa `/search` type: `auto` (default) or the cheaper `lite`.
-- `DEEP_RESEARCH_CONTENT_TOP` — in Serper mode, page texts fetched per query (default 5;
-  `0` disables content fetching, leaving snippet-only sources).
+- `DEEP_RESEARCH_DEEPSEEK_KEY` — the DeepSeek key used by the scripts (required; missing exits 2).
+- `DEEP_RESEARCH_NUM_RESULTS` — results per search query (default 20; `--num-results` wins).
+- `DEEP_RESEARCH_MAX_CHARS` — short page-text characters per source in `sources.json`
+  (default 6000; `--max-chars` wins).
+
+History: this skill used Exa (and briefly Serper) for search and page text. Exa is no longer
+used; DeepSeek Search & Fetch does both.
 
 Layout:
 
@@ -182,4 +187,5 @@ skills/deep-research/SKILL.md              agent-facing checklist
 skills/deep-research/scripts/research.py   init/search/fetch/finalize/status
 skills/deep-research/templates/report.md   report skeleton
 tests/                                     offline pytest suite (mock HTTP, subprocess concurrency)
+evals/                                     end-to-end eval harness against a real Hermes Agent
 ```
