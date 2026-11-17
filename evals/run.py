@@ -2,7 +2,7 @@
 """Run the deep-research skill end to end inside a real, isolated Hermes Agent.
 
 Matrix: topics x skill configs x repetitions. Each run gets its own HOME and
-HERMES_HOME, a variant of the skill, an Exa key and the OpenCode Go endpoint.
+HERMES_HOME, a copy of the skill, a DeepSeek key and the OpenCode Go endpoint.
 Stats are collected from the work dir, `log.jsonl`, `final.json`, the
 stdout/stderr transcript and Hermes' per-home `state.db` usage ledger. The
 deliverable is the markdown report.
@@ -13,8 +13,8 @@ tracked files, stats or transcripts.
 
 Usage
 -----
-    python3 evals/run.py --batch smoke --topics smoke --configs B --reps 1
-    python3 evals/run.py --batch full --topics posgrado,gpu-peru --configs A,B,C,D --reps 2 --parallel 3
+    python3 evals/run.py --batch smoke --topics smoke --configs K --reps 1
+    python3 evals/run.py --batch full --topics topic-a,topic-b --configs K --reps 2 --parallel 3
 """
 
 from __future__ import annotations
@@ -56,9 +56,11 @@ PRICE_INPUT = 0.15
 PRICE_OUTPUT = 0.60
 PRICE_CACHED = 0.003
 
-SECRET_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY")
-REQUIRED_KEYS = SECRET_KEYS + ("OPENCODE_GO_BASE_URL",)
-RUN_EXA_KEY_VAR = "DEEP_RESEARCH_EXA_KEY"
+SECRET_KEYS = ("OPENCODE_GO_API_KEY", "DEEPSEEK_API_KEY")
+REQUIRED_KEYS = ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL", "DEEPSEEK_API_KEY")
+# The skill declares DEEP_RESEARCH_DEEPSEEK_KEY; each run's HERMES_HOME/.env gets
+# it from DEEPSEEK_API_KEY so Hermes registers it for the terminal sandbox.
+RUN_DEEPSEEK_KEY_VAR = "DEEP_RESEARCH_DEEPSEEK_KEY"
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -186,7 +188,7 @@ def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_
         shutil.rmtree(dest)
     shutil.copytree(skill_dir, dest)
     env_lines = [
-        f"{RUN_EXA_KEY_VAR}={secrets['EXA_API_KEY']}",
+        f"{RUN_DEEPSEEK_KEY_VAR}={secrets['DEEPSEEK_API_KEY']}",
         f"OPENCODE_GO_API_KEY={secrets['OPENCODE_GO_API_KEY']}",
         f"OPENCODE_GO_BASE_URL={secrets['OPENCODE_GO_BASE_URL']}",
     ]
@@ -327,10 +329,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     for key in REQUIRED_KEYS:
         env[key] = secrets[key]
     # The dedicated key reaches the terminal only through HERMES_HOME/.env and
-    # the skill's required_environment_variables declaration; EXA_API_KEY must
-    # not leak in from the caller.
-    env.pop("EXA_API_KEY", None)
-    env.pop(RUN_EXA_KEY_VAR, None)
+    # the skill's required_environment_variables declaration.
     env.pop("HERMES_SINGLE_QUERY_SESSION", None)
 
     cmd = [
@@ -436,7 +435,11 @@ def read_log(work: Path | None) -> list[dict]:
 
 
 def run_dir_exa_cost(run_dir: Path) -> float:
-    """Exa spend for one run: stats.json when finished, live sources.json while running."""
+    """Search spend for one run: stats.json when finished, live sources.json while running.
+
+    The stats field is still named `exa_cost_usd` for backwards compatibility;
+    it now holds DeepSeek Search & Fetch spend from registry `cost_dollars`.
+    """
     stats = read_json(run_dir / "stats.json", {})
     if stats:
         try:
@@ -456,7 +459,7 @@ def run_dir_exa_cost(run_dir: Path) -> float:
 
 
 def batch_exa_spend(batch: str) -> float:
-    """Exa spend of every run dir in the batch, finished or in flight."""
+    """Search spend of every run dir in the batch, finished or in flight."""
     runs_dir = RESULTS_DIR / batch / "runs"
     if not runs_dir.is_dir():
         return 0.0
@@ -693,7 +696,7 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
         + usage["cache_read"] * PRICE_CACHED
         + (usage["output"] + usage["cache_write"]) * PRICE_OUTPUT
     ) / 1_000_000
-    exa_cost = float(registry.get("cost_dollars") or 0.0)
+    search_cost = float(registry.get("cost_dollars") or 0.0)
 
     coverage = final_info.get("coverage") or {}
     cited_paragraphs = int(coverage.get("cited_paragraphs") or 0)
@@ -759,8 +762,8 @@ def collect_stats(*, batch: str, topic: dict, config: str, rep: int, out: Path,
             "api_calls": usage["api_calls"], "usage_rows": usage["usage_rows"],
         },
         "llm_cost_usd": round(llm_cost, 6),
-        "exa_cost_usd": round(exa_cost, 6),
-        "total_cost_usd": round(llm_cost + exa_cost, 6),
+        "exa_cost_usd": round(search_cost, 6),
+        "total_cost_usd": round(llm_cost + search_cost, 6),
         "pricing": {"input_per_m": PRICE_INPUT, "output_per_m": PRICE_OUTPUT, "cached_per_m": PRICE_CACHED},
         "n_subquestions": len(plan.get("subquestions") or []),
         "n_asks": len(asks),
@@ -837,7 +840,7 @@ def render_stats_md(stats: dict) -> str:
         f"- tokens: {stats['llm_tokens'].get('input_total', stats['llm_tokens']['input'])} in "
         f"({stats['llm_tokens']['cache_read']} cached), {stats['llm_tokens']['output']} out, "
         f"{stats['llm_tokens']['api_calls']} API calls",
-        f"- LLM: ${stats['llm_cost_usd']:.4f} · Exa: ${stats['exa_cost_usd']:.4f} · "
+        f"- LLM: ${stats['llm_cost_usd']:.4f} · search: ${stats['exa_cost_usd']:.4f} · "
         f"total: ${stats['total_cost_usd']:.4f}",
         "",
         "## Citations",
@@ -874,12 +877,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deep-research eval matrix in isolated Hermes homes.")
     parser.add_argument("--batch", required=True, help="result batch name")
     parser.add_argument("--topics", default="", help="comma-separated topic ids (default: all)")
-    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs (A-F)")
+    parser.add_argument("--configs", default="K", help="comma-separated skill configs (K)")
     parser.add_argument("--reps", type=int, default=1, help="repetitions per topic x config")
     parser.add_argument("--parallel", type=int, default=3, help="parallel Hermes runs")
     parser.add_argument("--timeout-min", type=int, default=40, help="per-run wall timeout")
     parser.add_argument("--max-exa-usd", type=float, default=None,
-                        help="do not start new runs once the batch's Exa spend reaches this cap")
+                        help="do not start new runs once the batch's search spend reaches this cap")
     parser.add_argument("--force", action="store_true", help="re-run even when stats.json exists")
     parser.add_argument("--dry-run", action="store_true", help="print the run matrix, do nothing")
     args = parser.parse_args(argv)

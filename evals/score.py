@@ -133,7 +133,7 @@ def group_by_config(runs: list[dict], judged: dict[str, dict]) -> dict[str, dict
 def config_rows(table: dict[str, dict]) -> list[str]:
     lines = [
         "| config | runs | ok | mean rank | accuracy | depth | structure | citations | "
-        "covered_all_asks | guide_ok | sources found | cited | cited/found | coverage | Exa $ | LLM $ | total $ | wall s |",
+        "covered_all_asks | guide_ok | sources found | cited | cited/found | coverage | search $ | LLM $ | total $ | wall s |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for config in sorted(table):

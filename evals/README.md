@@ -14,9 +14,8 @@ mode 600). `run.py` uses it when present and falls back to the tracked
 contents live under `evals/results/` (gitignored) and are never copied into
 tracked files. Secrets live in `evals/.env` (gitignored, mode 600) and are only
 written to per-run `HERMES_HOME/.env` files (mode 600) under `evals/.run/`.
-The Exa key is written there as `DEEP_RESEARCH_EXA_KEY` (the skill's declared
-variable), not `EXA_API_KEY`: Hermes blocklists the latter from terminal
-passthrough.
+The DeepSeek key is written there as `DEEP_RESEARCH_DEEPSEEK_KEY` (the skill's
+declared variable).
 
 ## Setup
 
@@ -24,29 +23,31 @@ passthrough.
 git clone --depth 1 https://github.com/NousResearch/hermes-agent evals/.run/hermes-src
 UV_PROJECT_ENVIRONMENT=$PWD/evals/.run/hermes-venv \
   uv sync --project evals/.run/hermes-src --no-dev
-# evals/.env: EXA_API_KEY, OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL
+# evals/.env: OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL, DEEPSEEK_API_KEY
 chmod 600 evals/.env
 ```
 
-Each run writes `DEEP_RESEARCH_EXA_KEY` into its `HERMES_HOME/.env`; the skill
-declares that variable, so Hermes registers it for the terminal sandbox through
-the real `required_environment_variables` passthrough. No `python3` shim and no
-`EXA_API_KEY` export.
+Each run writes `DEEP_RESEARCH_DEEPSEEK_KEY` into its `HERMES_HOME/.env`; the
+skill declares that variable, so Hermes registers it for the terminal sandbox
+through the real `required_environment_variables` passthrough. No `python3`
+shim and no manual export.
 
 ## Run
 
 ```bash
 python3 evals/variants.py --check
-python3 evals/run.py --batch smoke --topics smoke --configs B --reps 1
-python3 evals/run.py --batch full --configs A,B,C,D,E,F --reps 2 --parallel 3 --max-exa-usd 20
+python3 evals/run.py --batch smoke --topics smoke --configs K --reps 1
+python3 evals/run.py --batch full --configs K --reps 2 --parallel 3 --max-exa-usd 5
 ```
 
-Each run gets its own `HOME` and `HERMES_HOME`, the variant skill, a 40-minute
+Each run gets its own `HOME` and `HERMES_HOME`, a copy of the skill, a 40-minute
 timeout and a resumable `stats.json`. Completed runs are skipped; pass `--force`
-to redo one. Runs are ordered rep 1 first, topic by topic, with a stable shuffled
-config order per topic. `--max-exa-usd X` stops starting new runs once the
-batch's finished plus in-flight Exa spend reaches X; in-flight runs finish, and
-re-invoking with a higher cap resumes the remainder.
+to redo one. Runs are ordered rep 1 first, topic by topic. `--max-exa-usd X`
+stops starting new runs once the batch's finished plus in-flight search spend
+reaches X; in-flight runs finish, and re-invoking with a higher cap resumes the
+remainder. `--max-exa-usd` and the stats field `exa_cost_usd` keep their old
+names but now measure DeepSeek Search & Fetch spend from `sources.json`
+`cost_dollars` (at $0.00075 per successful request, ~$0.10 per report).
 
 ## Package and score
 
@@ -66,19 +67,11 @@ rest run. `score.py` joins the ranking with the stats and writes `SUMMARY.md`
 
 ## Configs
 
-| Config | Subquestions | Results/query | Chars/source | Follow-ups | Delegation |
+| Config | Skill | Results/query | Chars/source | Follow-ups | Delegation |
 |---|---|---|---|---|---|
-| A | exactly 4 | 5 | 6000 | 4 search / 2-4 fetch | yes |
-| B | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
-| C | exactly 8 | 10 | 6000 | 4 search / 2-4 fetch | yes |
-| D | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | no, sequential self-research |
-| E | 4-8 as shipped (target 6) | 5 | 2000 | 2 search / 2 fetch | yes |
-| F | 4-8 as shipped (target 6) | 10 | 6000 | 2 search / 2-6 fetch; exactly 3 queries/subq | yes |
+| K | shipped, unpatched | 20 | 6000 (+ full page cache) | 6 search / 3-8 fetch | yes |
 
-`evals/variants.py` copies `skills/deep-research/` and patches `SKILL.md` with
-anchored exact-string replacements; a missing anchor fails the build loudly.
-`DEEP_RESEARCH_NUM_RESULTS` and `DEEP_RESEARCH_MAX_CHARS` drive results and page
-text per query at runtime.
-
-Since 2026-11-17 the skill uses Exa type lite; runs before batch m6 used type auto,
-so compare across that boundary with care.
+`evals/variants.py` copies `skills/deep-research/` unchanged for config K;
+`--check` verifies the copy is byte-identical. `DEEP_RESEARCH_NUM_RESULTS` and
+`DEEP_RESEARCH_MAX_CHARS` drive results and stored page text per query at
+runtime.
