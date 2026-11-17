@@ -59,13 +59,6 @@ PRICE_CACHED = 0.003
 SECRET_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY")
 REQUIRED_KEYS = SECRET_KEYS + ("OPENCODE_GO_BASE_URL",)
 RUN_EXA_KEY_VAR = "DEEP_RESEARCH_EXA_KEY"
-RUN_SERPER_KEY_VAR = "DEEP_RESEARCH_SERPER_KEY"
-CONFIG_ENV_KEYS = (
-    "DEEP_RESEARCH_EXA_TYPE",
-    "DEEP_RESEARCH_SEARCH_PROVIDER",
-    "DEEP_RESEARCH_CONTENT_TOP",
-    RUN_SERPER_KEY_VAR,
-)
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -185,8 +178,8 @@ def hermes_version() -> str:
     return f"git.{commit}" if proc.returncode == 0 and commit else "unknown"
 
 
-def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_results: int, base_url: str,
-                      extra_env: dict[str, str] | None = None) -> None:
+def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_results: int,
+                      base_url: str) -> None:
     (home / "skills").mkdir(parents=True, exist_ok=True)
     dest = home / "skills" / SKILL_NAME
     if dest.exists():
@@ -197,7 +190,6 @@ def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_
         f"OPENCODE_GO_API_KEY={secrets['OPENCODE_GO_API_KEY']}",
         f"OPENCODE_GO_BASE_URL={secrets['OPENCODE_GO_BASE_URL']}",
     ]
-    env_lines += [f"{key}={value}" for key, value in (extra_env or {}).items()]
     env_path = home / ".env"
     env_path.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
     env_path.chmod(0o600)
@@ -306,8 +298,7 @@ def safe_name(text: str) -> str:
 
 def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Namespace,
             secrets: dict[str, str], variant_skill: Path, version: str, num_results: int,
-            max_chars: int, base_url: str, config_env: dict[str, str] | None = None,
-            serper_key: str | None = None) -> dict:
+            max_chars: int, base_url: str) -> dict:
     rid = run_id(topic["id"], config, rep)
     out = RESULTS_DIR / batch / "runs" / rid
     stats_path = out / "stats.json"
@@ -324,8 +315,7 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     if hermes_home.exists():
         shutil.rmtree(hermes_home)
     hermes_home.mkdir(parents=True)
-    home_env = {RUN_SERPER_KEY_VAR: serper_key} if serper_key else None
-    write_hermes_home(hermes_home, variant_skill, secrets, num_results, base_url, home_env)
+    write_hermes_home(hermes_home, variant_skill, secrets, num_results, base_url)
 
     env = os.environ.copy()
     env.update({
@@ -334,9 +324,6 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
         "DEEP_RESEARCH_NUM_RESULTS": str(num_results),
         "DEEP_RESEARCH_MAX_CHARS": str(max_chars),
     })
-    for key in CONFIG_ENV_KEYS:
-        env.pop(key, None)
-    env.update(config_env or {})
     for key in REQUIRED_KEYS:
         env[key] = secrets[key]
     # The dedicated key reaches the terminal only through HERMES_HOME/.env and
@@ -887,7 +874,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deep-research eval matrix in isolated Hermes homes.")
     parser.add_argument("--batch", required=True, help="result batch name")
     parser.add_argument("--topics", default="", help="comma-separated topic ids (default: all)")
-    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs (A-H)")
+    parser.add_argument("--configs", default="A,B,C,D", help="comma-separated skill configs (A-F)")
     parser.add_argument("--reps", type=int, default=1, help="repetitions per topic x config")
     parser.add_argument("--parallel", type=int, default=3, help="parallel Hermes runs")
     parser.add_argument("--timeout-min", type=int, default=40, help="per-run wall timeout")
@@ -926,13 +913,6 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         raise SystemExit(f"unknown config(s): {', '.join(unknown)}")
     built = variants.build_all(VARIANTS_DIR)
-    config_env = {config: dict(variants.CONFIGS[config].get("env") or {}) for config in configs}
-    for config, env_values in config_env.items():
-        if env_values.get("DEEP_RESEARCH_SEARCH_PROVIDER") == "serper" and not secrets.get("SERPER_API_KEY"):
-            raise SystemExit(
-                f"config {config} uses the Serper provider; set SERPER_API_KEY in "
-                f"{ENV_FILE.relative_to(ROOT)} (mode 600, gitignored)"
-            )
     version = hermes_version()
     base_url = secrets["OPENCODE_GO_BASE_URL"]
     print(f"hermes: {version}")
@@ -964,13 +944,10 @@ def main(argv: list[str] | None = None) -> int:
                         pending.clear()
                         break
                 topic, config, rep = pending.pop(0)
-                serper_key = (secrets.get("SERPER_API_KEY")
-                              if config_env[config].get("DEEP_RESEARCH_SEARCH_PROVIDER") == "serper" else None)
                 future = pool.submit(
                     run_one, args.batch, topic, config, rep, args, secrets, built[config],
                     version, variants.CONFIGS[config]["num_results"],
                     variants.CONFIGS[config].get("max_chars", 6000), base_url,
-                    config_env[config], serper_key,
                 )
                 active[future] = (topic, config, rep)
             if not active:

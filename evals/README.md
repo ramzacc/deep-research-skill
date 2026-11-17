@@ -24,8 +24,7 @@ passthrough.
 git clone --depth 1 https://github.com/NousResearch/hermes-agent evals/.run/hermes-src
 UV_PROJECT_ENVIRONMENT=$PWD/evals/.run/hermes-venv \
   uv sync --project evals/.run/hermes-src --no-dev
-# evals/.env: EXA_API_KEY, OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL,
-#             SERPER_API_KEY (only needed for config H)
+# evals/.env: EXA_API_KEY, OPENCODE_GO_API_KEY, OPENCODE_GO_BASE_URL
 chmod 600 evals/.env
 ```
 
@@ -75,21 +74,11 @@ rest run. `score.py` joins the ranking with the stats and writes `SUMMARY.md`
 | D | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | no, sequential self-research |
 | E | 4-8 as shipped (target 6) | 5 | 2000 | 2 search / 2 fetch | yes |
 | F | 4-8 as shipped (target 6) | 10 | 6000 | 2 search / 2-6 fetch; exactly 3 queries/subq | yes |
-| G | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
-| H | 4-8 as shipped (target 6) | 8 | 6000 | 4 search / 2-4 fetch | yes |
 
 `evals/variants.py` copies `skills/deep-research/` and patches `SKILL.md` with
 anchored exact-string replacements; a missing anchor fails the build loudly.
 `DEEP_RESEARCH_NUM_RESULTS` and `DEEP_RESEARCH_MAX_CHARS` drive results and page
 text per query at runtime.
 
-Configs may also carry an `env` dict that `run.py` applies to the run:
-
-- **B** pins `DEEP_RESEARCH_EXA_TYPE=auto` (the default before `lite`), so earlier B results stay comparable.
-- **G** sets `DEEP_RESEARCH_EXA_TYPE=lite` (cheaper Exa `/search` type; now the shipped default).
-- **H** sets `DEEP_RESEARCH_SEARCH_PROVIDER=serper` and
-  `DEEP_RESEARCH_CONTENT_TOP=5`, and its variant `SKILL.md` additionally declares
-  `DEEP_RESEARCH_SERPER_KEY` so Hermes registers it for the terminal sandbox.
-  `run.py` copies `SERPER_API_KEY` from `evals/.env` into that run's
-  `HERMES_HOME/.env` as `DEEP_RESEARCH_SERPER_KEY` (mode 600) and refuses to start
-  H when the key is absent.
+Since 2026-11-17 the skill uses Exa type lite; runs before batch m6 used type auto,
+so compare across that boundary with care.
