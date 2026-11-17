@@ -7,7 +7,7 @@ run-time knobs.
 
 Configs
 -------
-K  shipped skill exactly as committed, 20 results per query (DeepSeek Search & Fetch)
+K  shipped skill exactly as committed, 10 results per query (Exa lite)
 
 `num_results` is applied at run time through `DEEP_RESEARCH_NUM_RESULTS`.
 
@@ -32,8 +32,8 @@ DEFAULT_OUT = ROOT / "evals" / ".run" / "skills"
 
 CONFIGS: dict[str, dict] = {
     "K": {
-        "description": "shipped skill, unpatched: 20 results/query, DeepSeek Search & Fetch",
-        "num_results": 20,
+        "description": "shipped skill, unpatched: 10 results/query, Exa lite",
+        "num_results": 10,
     },
 }
 

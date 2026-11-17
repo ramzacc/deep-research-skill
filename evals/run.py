@@ -2,7 +2,7 @@
 """Run the deep-research skill end to end inside a real, isolated Hermes Agent.
 
 Matrix: topics x skill configs x repetitions. Each run gets its own HOME and
-HERMES_HOME, a copy of the skill, a DeepSeek key and the OpenCode Go endpoint.
+HERMES_HOME, a copy of the skill, an Exa key and the OpenCode Go endpoint.
 Stats are collected from the work dir, `log.jsonl`, `final.json`, the
 stdout/stderr transcript and Hermes' per-home `state.db` usage ledger. The
 deliverable is the markdown report.
@@ -56,11 +56,11 @@ PRICE_INPUT = 0.15
 PRICE_OUTPUT = 0.60
 PRICE_CACHED = 0.003
 
-SECRET_KEYS = ("OPENCODE_GO_API_KEY", "DEEPSEEK_API_KEY")
-REQUIRED_KEYS = ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL", "DEEPSEEK_API_KEY")
-# The skill declares DEEP_RESEARCH_DEEPSEEK_KEY; each run's HERMES_HOME/.env gets
-# it from DEEPSEEK_API_KEY so Hermes registers it for the terminal sandbox.
-RUN_DEEPSEEK_KEY_VAR = "DEEP_RESEARCH_DEEPSEEK_KEY"
+SECRET_KEYS = ("EXA_API_KEY", "OPENCODE_GO_API_KEY")
+REQUIRED_KEYS = ("OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL", "EXA_API_KEY")
+# The skill declares DEEP_RESEARCH_EXA_KEY; each run's HERMES_HOME/.env gets it
+# from EXA_API_KEY so Hermes registers it for the terminal sandbox.
+RUN_EXA_KEY_VAR = "DEEP_RESEARCH_EXA_KEY"
 
 TOPIC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -188,7 +188,7 @@ def write_hermes_home(home: Path, skill_dir: Path, secrets: dict[str, str], num_
         shutil.rmtree(dest)
     shutil.copytree(skill_dir, dest)
     env_lines = [
-        f"{RUN_DEEPSEEK_KEY_VAR}={secrets['DEEPSEEK_API_KEY']}",
+        f"{RUN_EXA_KEY_VAR}={secrets['EXA_API_KEY']}",
         f"OPENCODE_GO_API_KEY={secrets['OPENCODE_GO_API_KEY']}",
         f"OPENCODE_GO_BASE_URL={secrets['OPENCODE_GO_BASE_URL']}",
     ]
@@ -329,7 +329,10 @@ def run_one(batch: str, topic: dict, config: str, rep: int, args: argparse.Names
     for key in REQUIRED_KEYS:
         env[key] = secrets[key]
     # The dedicated key reaches the terminal only through HERMES_HOME/.env and
-    # the skill's required_environment_variables declaration.
+    # the skill's required_environment_variables declaration; EXA_API_KEY must
+    # not leak in from the caller.
+    env.pop("EXA_API_KEY", None)
+    env.pop(RUN_EXA_KEY_VAR, None)
     env.pop("HERMES_SINGLE_QUERY_SESSION", None)
 
     cmd = [
@@ -438,7 +441,7 @@ def run_dir_exa_cost(run_dir: Path) -> float:
     """Search spend for one run: stats.json when finished, live sources.json while running.
 
     The stats field is still named `exa_cost_usd` for backwards compatibility;
-    it now holds DeepSeek Search & Fetch spend from registry `cost_dollars`.
+    it holds Exa spend from registry `cost_dollars`.
     """
     stats = read_json(run_dir / "stats.json", {})
     if stats:

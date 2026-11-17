@@ -9,9 +9,9 @@ fetch     full text of one source id (or a new URL), with optional --grep window
 finalize  validate + renumber citations, add References, write the final report
 status    show which pipeline steps are done (used to resume)
 
-Search and page fetching use DeepSeek's Search & Fetch API ($0.00075 per
-successful request). All state lives in a work dir (default:
-~/research/.work/<slug>/):
+Search and page fetching use Exa's Search & Contents API (type "lite"; billed
+per request from each response's `costDollars.total`). All state lives in a work
+dir (default: ~/research/.work/<slug>/):
 
     plan.json                 written by the agent
     sources.json              source registry (stable S-ids, merged under flock)
@@ -46,10 +46,12 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
-DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
-DEEPSEEK_USD_PER_REQUEST = 0.00075
-DEEPSEEK_MAX_QUERY_CHARS = 128
+EXA_SEARCH_URL = "https://api.exa.ai/search"
+EXA_CONTENTS_URL = "https://api.exa.ai/contents"
+# Page text requested from /search and cached in pages/<S#>.md. The short text
+# kept in sources.json is capped separately by DEEP_RESEARCH_MAX_CHARS.
+SEARCH_TEXT_MAX_CHARS = 20_000
+SITE_TOKEN_RE = re.compile(r"\bsite:(\S+)", re.IGNORECASE)
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,60}$")
 QID_RE = re.compile(r"^q[0-9]+$")
 IDENTIFY_Q1_RE = re.compile(
@@ -69,9 +71,9 @@ MOCK_ENV = "DEEP_RESEARCH_MOCK"
 BACKOFF_ENV = "DEEP_RESEARCH_BACKOFF_BASE"
 
 # Results per query. DEEP_RESEARCH_NUM_RESULTS is the default; --num-results wins.
-# Search is billed per request, not per result, so a high count is free recall.
+# Exa lite's base price covers up to 10 results; more costs extra.
 NUM_RESULTS_ENV = "DEEP_RESEARCH_NUM_RESULTS"
-DEFAULT_NUM_RESULTS = 20
+DEFAULT_NUM_RESULTS = 10
 # Characters of page text kept per source in sources.json (the full page goes to
 # pages/<S#>.md). DEEP_RESEARCH_MAX_CHARS is the default; --max-chars wins.
 MAX_CHARS_ENV = "DEEP_RESEARCH_MAX_CHARS"
@@ -87,7 +89,7 @@ DIGEST_FULL_LIMIT = 25
 # fetch --grep: context characters around a match, and the window cap.
 GREP_WINDOW = 400
 GREP_MAX_WINDOWS = 15
-DEEPSEEK_KEY_ENV = "DEEP_RESEARCH_DEEPSEEK_KEY"
+EXA_KEY_ENV = "DEEP_RESEARCH_EXA_KEY"
 LOG_FILE = "log.jsonl"
 QUERY_INDEX = "queries.json"
 
@@ -246,32 +248,36 @@ def _load_mock_fixture() -> dict:
     return fixture
 
 
-def _mock_route(payload: dict) -> dict | None:
+def _mock_route(payload: dict, endpoint: str = "search") -> dict | None:
     fixture = _load_mock_fixture()
     routes = fixture.get("routes") or []
-    haystack = str(payload.get("query", "") or payload.get("url", ""))
+    haystack = str(payload.get("query", ""))
+    if not haystack:
+        haystack = " ".join(str(url) for url in payload.get("urls") or [])
     matches = []
     for idx, route in enumerate(routes):
         if not isinstance(route, dict):
             continue
-        if (route.get("endpoint") or "deepseek") != "deepseek":
+        wanted = route.get("endpoint")
+        if wanted and wanted != endpoint:
             continue
         needle = route.get("contains")
         if needle and needle not in haystack:
             continue
         matches.append((idx, route))
     if not matches:
-        default = fixture.get("default_deepseek") or fixture.get("default")
+        key = "default_contents" if endpoint == "contents" else "default_search"
+        default = fixture.get(key) or fixture.get("default")
         return {"responses": [default]} if default else None
     # most specific match wins: longest matched needle, then declaration order
     matches.sort(key=lambda pair: (-len(pair[1].get("contains") or ""), pair[0]))
     return matches[0][1]
 
 
-def _mock_response(payload: dict) -> dict:
-    route = _mock_route(payload)
+def _mock_response(endpoint: str, payload: dict) -> dict:
+    route = _mock_route(payload, endpoint)
     if route is None:
-        raise HttpError(599, f"no mock route for payload {json.dumps(payload)[:300]}")
+        raise HttpError(599, f"no mock route for {endpoint} payload {json.dumps(payload)[:300]}")
     responses = route.get("responses") or [{"json": {}}]
     key = f"{os.environ.get(MOCK_ENV)}::{id(route)}"
     with _MOCK_LOCK:
@@ -291,8 +297,9 @@ def _mock_response(payload: dict) -> dict:
 def http_post_json(url: str, payload: dict, timeout: float = 45.0,
                    headers: dict[str, str] | None = None) -> dict:
     """POST JSON, return parsed JSON. Raises HttpError on any failure."""
+    endpoint = "contents" if url.rstrip("/").endswith("/contents") else "search"
     if os.environ.get(MOCK_ENV):
-        return _mock_response(payload)
+        return _mock_response(endpoint, payload)
     body = json.dumps(payload).encode("utf-8")
     request_headers = {
         "Content-Type": "application/json",
@@ -318,7 +325,7 @@ def http_post_json(url: str, payload: dict, timeout: float = 45.0,
 
 
 def default_num_results() -> int:
-    """Results per query: DEEP_RESEARCH_NUM_RESULTS, then 20. The CLI flag wins."""
+    """Results per query: DEEP_RESEARCH_NUM_RESULTS, then 10. The CLI flag wins."""
     raw = os.environ.get(NUM_RESULTS_ENV, "").strip()
     if not raw:
         return DEFAULT_NUM_RESULTS
@@ -359,13 +366,13 @@ def parse_today_arg(value: str | None) -> date:
         die(f"error: --today must be YYYY-MM-DD (got {value!r})", 2)
 
 
-def deepseek_key_required() -> str:
-    key = os.environ.get(DEEPSEEK_KEY_ENV, "").strip()
+def exa_key_required() -> str:
+    key = os.environ.get(EXA_KEY_ENV, "").strip()
     if not key:
         die(
-            f"error: {DEEPSEEK_KEY_ENV} is not set.\n"
-            "Deep research needs a DeepSeek API key:\n"
-            f"  hermes config set {DEEPSEEK_KEY_ENV} <your key>",
+            f"error: {EXA_KEY_ENV} is not set.\n"
+            "Deep research needs an Exa API key:\n"
+            f"  hermes config set {EXA_KEY_ENV} <your key>",
             2,
         )
     return key
@@ -395,59 +402,68 @@ def with_retries(fn, attempts: int = 3, label: str = "request"):
     raise last or HttpError(0, "retry loop produced no result")
 
 
-def truncate_deepseek_query(query: str, label: str = "query") -> str:
-    """Cut a query to DeepSeek's 128-character limit at a word boundary."""
-    query = str(query or "").strip()
-    if len(query) <= DEEPSEEK_MAX_QUERY_CHARS:
-        return query
-    cut = query[:DEEPSEEK_MAX_QUERY_CHARS]
-    boundary = cut.rfind(" ")
-    if boundary > 0:
-        cut = cut[:boundary]
-    cut = cut.rstrip()
-    note(
-        f"warning: {label} is {len(query)} chars; DeepSeek accepts at most "
-        f"{DEEPSEEK_MAX_QUERY_CHARS}; sending {len(cut)}"
-    )
-    return cut
+def split_site_operators(query: str) -> tuple[str, list[str]]:
+    """Move site:domain tokens out of the query text (Exa wants includeDomains).
+
+    Returns (query_text, domains). A query made only of site: tokens keeps its
+    original text; the domains are still returned.
+    """
+    domains: list[str] = []
+
+    def collect(match: re.Match) -> str:
+        domain = match.group(1).strip().strip("\"'").lower().rstrip("/")
+        if domain and domain not in domains:
+            domains.append(domain)
+        return " "
+
+    stripped = " ".join(SITE_TOKEN_RE.sub(collect, query).split())
+    if not domains:
+        return query, domains
+    return (stripped or query), domains
 
 
-def _deepseek_post(url: str, payload: dict, api_key: str) -> dict:
+def _exa_post(url: str, payload: dict, api_key: str) -> dict:
     try:
-        return http_post_json(url, payload, headers={"Authorization": f"Bearer {api_key}"})
+        return http_post_json(url, payload, headers={"x-api-key": api_key})
     except HttpError as exc:
         if exc.status == 402:
             raise HttpError(
-                402, "insufficient balance on the DeepSeek account; top up your balance"
+                402, "insufficient balance on the Exa account; top up your balance"
             ) from exc
         raise
 
 
-def _strip_url_fragment(url: str) -> str:
-    """DeepSeek returns URLs with junk fragments like `page#1#1#1`; drop them."""
-    return str(url or "").split("#", 1)[0].strip()
+def _cost_dollars(data: dict) -> float:
+    try:
+        return float((data.get("costDollars") or {}).get("total") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _is_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def deepseek_search(query: str, num_results: int, api_key: str,
-                    ori_question: str = "") -> tuple[list[dict], float]:
-    """One DeepSeek search request. Returns (results, cost).
+def exa_search(query: str, num_results: int, api_key: str) -> tuple[list[dict], float]:
+    """One Exa /search request (type lite). Returns (results, cost).
 
-    Each result carries the full page content (capped at PAGE_MAX_CHARS); the
-    registry keeps only the leading TEXT_MAX_CHARS as `text`.
+    Each result carries the page text (capped at SEARCH_TEXT_MAX_CHARS) and its
+    highlights; the registry keeps the joined highlights as `summary` and only
+    the leading TEXT_MAX_CHARS of text.
     """
+    query_text, domains = split_site_operators(query)
     payload = {
-        "query": truncate_deepseek_query(query, "query"),
-        "count": num_results,
-        "need_content": True,
+        "query": query_text,
+        "type": "lite",
+        "numResults": num_results,
+        "contents": {
+            "text": {"maxCharacters": SEARCH_TEXT_MAX_CHARS},
+            "highlights": True,
+        },
     }
-    ori = truncate_deepseek_query(ori_question, "ori_question")
-    if ori:
-        payload["ori_question"] = ori
-    data = _deepseek_post(DEEPSEEK_SEARCH_URL, payload, api_key)
+    if domains:
+        payload["includeDomains"] = domains
+    data = _exa_post(EXA_SEARCH_URL, payload, api_key)
     raw = data.get("results") or []
     if not isinstance(raw, list):
         raw = []
@@ -455,33 +471,35 @@ def deepseek_search(query: str, num_results: int, api_key: str,
     for item in raw:
         if not isinstance(item, dict):
             continue
-        url = _strip_url_fragment(item.get("url", ""))
+        url = str(item.get("url") or "").strip()
         if not url:
             continue
-        result = {
+        highlights = item.get("highlights")
+        if not isinstance(highlights, list):
+            highlights = []
+        summary = " ".join(str(hl).strip() for hl in highlights if str(hl).strip())
+        results.append({
             "url": url,
             "title": str(item.get("title") or "").strip(),
-            "publishedDate": item.get("date") or "",
-            "summary": str(item.get("summary") or "").strip(),
-            "content": str(item.get("content") or "")[:PAGE_MAX_CHARS],
-        }
-        if _is_number(item.get("authority")) and item["authority"] >= 0:
-            result["authority"] = item["authority"]
-        if _is_number(item.get("rerank_score")):
-            result["rerank"] = item["rerank_score"]
-        results.append(result)
-    # A successful request with no results is not billed.
-    return results, (DEEPSEEK_USD_PER_REQUEST if raw else 0.0)
+            "publishedDate": item.get("publishedDate") or "",
+            "summary": summary,
+            "content": str(item.get("text") or "")[:PAGE_MAX_CHARS],
+        })
+    return results, _cost_dollars(data)
 
 
-def deepseek_fetch(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
-    data = _deepseek_post(DEEPSEEK_FETCH_URL, {"url": url}, api_key)
-    content = str(data.get("content") or "")
+def exa_contents(url: str, max_chars: int, api_key: str) -> tuple[dict, float]:
+    payload = {"urls": [url], "text": {"maxCharacters": max_chars}}
+    data = _exa_post(EXA_CONTENTS_URL, payload, api_key)
+    results = data.get("results") or []
+    if not results or not isinstance(results[0], dict):
+        raise HttpError(502, f"/contents returned no result for {url}")
+    item = results[0]
     page = {
-        "title": str(data.get("title") or "").strip(),
-        "text": content[:max_chars],
+        "title": str(item.get("title") or "").strip(),
+        "text": str(item.get("text") or "")[:max_chars],
     }
-    return page, (DEEPSEEK_USD_PER_REQUEST if content else 0.0)
+    return page, _cost_dollars(data)
 
 
 # --------------------------------------------------------------------------
@@ -635,7 +653,7 @@ def merge_records(registry: dict, records: list[dict], changes: list[dict] | Non
                   work: Path | None = None, text_chars: int = TEXT_MAX_CHARS) -> tuple[list[str], list[str]]:
     """Merge search records into the registry in place.
 
-    records: [{"qid": "q1", "query": "...", "results": [deepseek result, ...]}]
+    records: [{"qid": "q1", "query": "...", "results": [exa result, ...]}]
     Returns (new_ids, touched_ids). When *changes* is a list, one
     {"new_ids": [...], "matched_ids": [...]} entry per record is appended.
     Full page content is cached in pages/<S#>.md when *work* is given.
@@ -942,7 +960,7 @@ def recency_bonus(src: dict, today: "date | None" = None) -> float:
 
 
 def source_score(src: dict, today: "date | None" = None) -> float:
-    """Combined evidence score: DeepSeek rerank plus the recency bonus."""
+    """Combined evidence score: rerank score (when present) plus the recency bonus."""
     rerank = src.get("rerank")
     base = float(rerank) if _is_number(rerank) else 0.0
     return round(base + recency_bonus(src, today), 6)
@@ -1066,7 +1084,7 @@ def render_evidence(qid: str, question: str, sources: list[dict], work: Path,
     rest = ranked[DIGEST_FULL_LIMIT:]
     lines += [
         f"{len(sources)} candidate sources. Cite them as [S#]; ids are stable.",
-        f"Full sections for the top {len(full)} (best rerank+recency, authority, date); the "
+        f"Full sections for the top {len(full)} (best recency, then authority and date); the "
         "rest are one-liners you can still fetch with `fetch --id S#` and find with "
         "`recent --grep`.",
         "",
@@ -1238,19 +1256,19 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _execute_queries(pairs: list[tuple[str, str]], questions: dict[str, str],
-                     args: argparse.Namespace, api_key: str) -> tuple[list[dict], int]:
+def _execute_queries(pairs: list[tuple[str, str]], args: argparse.Namespace,
+                     api_key: str) -> tuple[list[dict], int]:
     """Run (qid, query) pairs in parallel. Returns (records, failures)."""
     records: list[dict] = []
     failures = 0
 
-    def run(qid: str, query: str) -> tuple[list[dict], float]:
-        return deepseek_search(query, args.num_results, api_key, questions.get(qid, ""))
+    def run(query: str) -> tuple[list[dict], float]:
+        return exa_search(query, args.num_results, api_key)
 
     workers = max(1, min(args.workers, len(pairs) or 1))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {
-            pool.submit(with_retries, lambda q=query, i=qid: run(i, q), 3, query): (qid, query)
+            pool.submit(with_retries, lambda q=query: run(q), 3, query): (qid, query)
             for qid, query in pairs
         }
         results: dict[tuple[str, str], dict] = {}
@@ -1301,7 +1319,6 @@ def cmd_search(args: argparse.Namespace) -> int:
                 break
         question = question or "(ad-hoc follow-up)"
         pairs = [(args.subq, query) for query in args.query]
-        questions = {args.subq: question}
     else:
         if not plan_path.exists():
             die(
@@ -1313,9 +1330,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         plan = read_json(plan_path, "plan.json")
         subquestions = validate_plan(plan)
         pairs = []
-        questions = {}
         for item in subquestions:
-            questions[item["id"]] = str(item.get("question") or "")
             for query in item["queries"]:
                 pairs.append((item["id"], query))
     if args.dry_run:
@@ -1329,7 +1344,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             for qid in sorted(counts, key=lambda q: int(q[1:])):
                 print(f"  {qid}: {counts[qid]} queries")
         return 0
-    api_key = deepseek_key_required() if pairs else ""
+    api_key = exa_key_required() if pairs else ""
     new_queries, skipped = reserve_queries(work, [query for _qid, query in pairs])
     for query in skipped:
         print(f"skipped duplicate: {query}")
@@ -1343,7 +1358,7 @@ def cmd_search(args: argparse.Namespace) -> int:
             remaining[query] -= 1
     if effective_pairs:
         note(f"searching: {len(effective_pairs)} queries with {args.workers} workers")
-        records, failures = _execute_queries(effective_pairs, questions, args, api_key)
+        records, failures = _execute_queries(effective_pairs, args, api_key)
     else:
         records, failures = [], 0
 
@@ -1370,7 +1385,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 "new_ids": new_ids,
                 "matched_ids": touched,
                 "fetched_id": None,
-                "provider": "deepseek",
+                "provider": "exa",
                 "cost": round(run_cost, 6),
                 "ok": not errors,
                 "error": "; ".join(errors) or None,
@@ -1384,7 +1399,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 "new_ids": change["new_ids"],
                 "matched_ids": change["matched_ids"],
                 "fetched_id": None,
-                "provider": "deepseek",
+                "provider": "exa",
                 "cost": round(float(record.get("cost") or 0.0), 6),
                 "ok": bool(record.get("ok")),
                 "error": record.get("error"),
@@ -1517,22 +1532,22 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         append_log(work, {
             "op": "fetch", "subq": subq or None, "queries": [],
             "new_ids": [sid] if registered_new else [], "matched_ids": [sid],
-            "fetched_id": sid, "provider": "deepseek", "cost": 0.0,
+            "fetched_id": sid, "provider": "exa", "cost": 0.0,
             "ok": True, "error": None, "cached": True,
         })
     else:
         cached = False
-        api_key = deepseek_key_required()
+        api_key = exa_key_required()
         note(f"fetching {sid}: {src['url']}")
         try:
             page, cost = with_retries(
-                lambda: deepseek_fetch(src["url"], PAGE_MAX_CHARS, api_key), 3,
-                f"DeepSeek fetch {sid}",
+                lambda: exa_contents(src["url"], PAGE_MAX_CHARS, api_key), 3,
+                f"Exa contents {sid}",
             )
         except HttpError as exc:
             append_log(work, {
                 "op": "fetch", "subq": subq or None, "queries": [], "new_ids": [],
-                "matched_ids": [], "fetched_id": sid, "provider": "deepseek",
+                "matched_ids": [], "fetched_id": sid, "provider": "exa",
                 "cost": None, "ok": False, "error": str(exc),
             })
             raise
@@ -1555,7 +1570,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         append_log(work, {
             "op": "fetch", "subq": subq or None, "queries": [],
             "new_ids": [sid] if registered_new else [], "matched_ids": [sid],
-            "fetched_id": sid, "provider": "deepseek", "cost": round(cost, 6),
+            "fetched_id": sid, "provider": "exa", "cost": round(cost, 6),
             "ok": True, "error": None,
         })
     if registered_new and subq and page_text:
@@ -1569,7 +1584,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     print(f"[{sid}] {src.get('title') or ''} — {src['url']}")
     print(f"page: {len(page_text)} chars · {'cached' if cached else 'fetched'}")
     if not page_text:
-        print("(no text returned by DeepSeek fetch)")
+        print("(no text returned by Exa contents)")
         return 0
     terms = [term for term in (args.grep or []) if str(term).strip()]
     if not terms:
@@ -2238,7 +2253,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="research.py",
-        description="Deterministic deep-research pipeline helper (DeepSeek Search & Fetch + local files).",
+        description="Deterministic deep-research pipeline helper (Exa Search & Contents + local files).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Typical flow:\n"

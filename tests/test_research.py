@@ -19,7 +19,9 @@ import research
 
 SCRIPT = Path(research.__file__).resolve()
 SLUG = "2026-11-15-test-topic"
-KEY = "test-deepseek-key"
+KEY = "test-exa-key"
+SEARCH_COST = 0.005
+CONTENTS_COST = 0.001
 
 
 # --------------------------------------------------------------------------
@@ -29,36 +31,33 @@ KEY = "test-deepseek-key"
 def mock_fixture(tmp_path: Path, routes: list[dict], default: dict | None = None) -> Path:
     fixture = {
         "routes": routes,
-        "default_deepseek": default or {"json": {"results": []}},
+        "default_search": default or {"json": {"results": []}},
     }
     path = tmp_path / "mock.json"
     path.write_text(json.dumps(fixture), encoding="utf-8")
     return path
 
 
-def search_ok(items: list[dict]) -> dict:
-    return {"status": 200, "json": {"results": items}}
+def search_ok(items: list[dict], cost: float = SEARCH_COST) -> dict:
+    return {"status": 200, "json": {"results": items, "costDollars": {"total": cost}}}
 
 
 def fetch_ok(content: str, title: str = "Fetched page") -> dict:
-    return {"status": 200, "json": {"title": title, "content": content}}
+    return {"status": 200, "json": {
+        "results": [{"title": title, "text": content}],
+        "costDollars": {"total": CONTENTS_COST},
+    }}
 
 
 def hit(url: str, title: str = "Title", published: str = "2025-03-04",
-        summary: str = "A summary.", content: str = "Body text.",
-        authority: int | None = None, rerank: float | None = None) -> dict:
-    item = {
+        summary: str = "A summary.", content: str = "Body text.") -> dict:
+    return {
         "url": url,
         "title": title,
-        "date": published,
-        "summary": summary,
-        "content": content,
+        "publishedDate": published,
+        "highlights": [summary] if summary else [],
+        "text": content,
     }
-    if authority is not None:
-        item["authority"] = authority
-    if rerank is not None:
-        item["rerank_score"] = rerank
-    return item
 
 
 def run_cli(args: list[str], capsys) -> tuple[int, str, str]:
@@ -134,7 +133,7 @@ def reset_query_index(work: Path) -> None:
 def use_sdk(monkeypatch, fixture: Path) -> None:
     monkeypatch.setenv(research.MOCK_ENV, str(fixture))
     monkeypatch.setenv(research.BACKOFF_ENV, "0")
-    monkeypatch.setenv(research.DEEPSEEK_KEY_ENV, KEY)
+    monkeypatch.setenv(research.EXA_KEY_ENV, KEY)
 
 
 def capture_http(monkeypatch) -> list[dict]:
@@ -211,7 +210,7 @@ def test_ids_stable_across_reruns_and_adhoc(tmp_path, monkeypatch, capsys):
     assert len(second) == 2
     assert {s["url"]: s["id"] for s in second} == first
     # queries were skipped as duplicates, so the total did not grow
-    assert load_sources(work)["cost_dollars"] == pytest.approx(research.DEEPSEEK_USD_PER_REQUEST * 2)
+    assert load_sources(work)["cost_dollars"] == pytest.approx(SEARCH_COST * 2)
 
     # ad-hoc: new url gets the next free id, the matched url keeps S1
     code, out, err = run_cli(
@@ -240,7 +239,7 @@ def subprocess_env(fixture: Path) -> dict:
     env = dict(os.environ)
     env[research.MOCK_ENV] = str(fixture)
     env[research.BACKOFF_ENV] = "0"
-    env[research.DEEPSEEK_KEY_ENV] = KEY
+    env[research.EXA_KEY_ENV] = KEY
     return env
 
 
@@ -275,7 +274,7 @@ def test_concurrent_adhoc_processes(tmp_path, capsys):
     assert len(set(ids)) == 6
     urls = {src["url"] for src in registry["sources"]}
     assert urls == {f"https://site{i}.example/page" for i in range(6)}
-    assert registry["cost_dollars"] == pytest.approx(6 * research.DEEPSEEK_USD_PER_REQUEST)
+    assert registry["cost_dollars"] == pytest.approx(6 * SEARCH_COST)
     assert "[S1]" in (work / "evidence" / "q1.md").read_text()
     # every source got its full page cached
     pages = sorted(path.name for path in (work / "pages").glob("S*.md"))
@@ -314,7 +313,7 @@ def test_log_jsonl_under_concurrent_adhoc(tmp_path, capsys):
     assert sorted(sid for record in records for sid in record["new_ids"]) == [f"S{i}" for i in range(1, 7)]
     assert all(isinstance(record["ts"], str) and record["ts"] for record in records)
     assert sum(float(record["cost"]) for record in records) == pytest.approx(
-        6 * research.DEEPSEEK_USD_PER_REQUEST
+        6 * SEARCH_COST
     )
 
 
@@ -471,7 +470,7 @@ def test_duplicate_queries_cost_nothing(tmp_path, monkeypatch, capsys):
     assert "skipped duplicate: same   query" in out
     assert "queries: 1 ok, 0 failed, 1 skipped duplicate(s)" in out
     registry = load_sources(work)
-    assert registry["cost_dollars"] == pytest.approx(research.DEEPSEEK_USD_PER_REQUEST)
+    assert registry["cost_dollars"] == pytest.approx(SEARCH_COST)
     events = [json.loads(line) for line in
               (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
     assert len(events) == 1
@@ -490,7 +489,7 @@ def test_adhoc_duplicate_after_batch_is_skipped(tmp_path, monkeypatch, capsys):
     )
     assert code == 0, err
     assert "skipped duplicate: SAME query!" in out
-    assert load_sources(work)["cost_dollars"] == pytest.approx(research.DEEPSEEK_USD_PER_REQUEST)
+    assert load_sources(work)["cost_dollars"] == pytest.approx(SEARCH_COST)
 
 
 def test_max_chars_controls_stored_source_text(tmp_path, monkeypatch, capsys):
@@ -538,25 +537,25 @@ def test_num_results_env_default_and_cli_override(tmp_path, monkeypatch, capsys)
     use_sdk(monkeypatch, fixture)
     seen: list[tuple[str, int]] = []
 
-    def fake(query, num_results, _api_key, ori_question=""):
+    def fake(query, num_results, _api_key):
         seen.append((query, num_results))
         return [], 0.0
 
-    monkeypatch.setattr(research, "deepseek_search", fake)
+    monkeypatch.setattr(research, "exa_search", fake)
     work = make_work(tmp_path, plan_of(("q1", ["a", "b"])))
 
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 0, err
-    assert sorted(seen) == [("a", 20), ("b", 20)]
-    assert research.default_num_results() == 20
+    assert sorted(seen) == [("a", 10), ("b", 10)]
+    assert research.default_num_results() == 10
 
     seen.clear()
     reset_query_index(work)
-    monkeypatch.setenv(research.NUM_RESULTS_ENV, "10")
+    monkeypatch.setenv(research.NUM_RESULTS_ENV, "5")
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 0, err
-    assert sorted(seen) == [("a", 10), ("b", 10)]
-    assert research.default_num_results() == 10
+    assert sorted(seen) == [("a", 5), ("b", 5)]
+    assert research.default_num_results() == 5
 
     seen.clear()
     reset_query_index(work)
@@ -565,19 +564,19 @@ def test_num_results_env_default_and_cli_override(tmp_path, monkeypatch, capsys)
     assert sorted(seen) == [("a", 3), ("b", 3)]
 
     monkeypatch.setenv(research.NUM_RESULTS_ENV, "not-a-number")
-    assert research.default_num_results() == 20
+    assert research.default_num_results() == 10
     monkeypatch.setenv(research.NUM_RESULTS_ENV, "0")
-    assert research.default_num_results() == 20
+    assert research.default_num_results() == 10
 
 
 def test_missing_key_is_actionable(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv(research.MOCK_ENV, raising=False)
-    monkeypatch.delenv(research.DEEPSEEK_KEY_ENV, raising=False)
+    monkeypatch.delenv(research.EXA_KEY_ENV, raising=False)
     work = make_work(tmp_path, plan_of(("q1", ["a"])))
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 2
-    assert "DEEP_RESEARCH_DEEPSEEK_KEY is not set" in err
-    assert "hermes config set DEEP_RESEARCH_DEEPSEEK_KEY" in err
+    assert "DEEP_RESEARCH_EXA_KEY is not set" in err
+    assert "hermes config set DEEP_RESEARCH_EXA_KEY" in err
 
 
 def test_invalid_slug_rejected(tmp_path, capsys):
@@ -1015,56 +1014,60 @@ def test_status_partial_state(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------
-# i. DeepSeek search: payload, ori_question, pages, tags, ranking, passages
+# i. Exa search: payload, site: domains, pages, tags, ranking, passages
 # --------------------------------------------------------------------------
 
-def test_search_payload_uses_count_and_ori_question(tmp_path, monkeypatch, capsys):
+def test_search_payload_uses_exa_lite_and_include_domains(tmp_path, monkeypatch, capsys):
     fixture = mock_fixture(tmp_path, [
-        {"contains": "query one", "responses": [search_ok([hit("https://one.example/a")])]},
+        {"contains": "tariff", "responses": [search_ok([hit("https://one.example/a")])]},
     ])
     use_sdk(monkeypatch, fixture)
     calls = capture_http(monkeypatch)
-    work = make_work(tmp_path, plan_of(("q1", ["query one"])))
+    work = make_work(tmp_path, plan_of(("q1", ["site:gob.pe tariff"])))
 
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 0, err
-    search_calls = [call for call in calls if call["url"] == research.DEEPSEEK_SEARCH_URL]
+    search_calls = [call for call in calls if call["url"] == research.EXA_SEARCH_URL]
     assert len(search_calls) == 1
     assert search_calls[0]["payload"] == {
-        "query": "query one",
-        "count": 20,
-        "need_content": True,
-        "ori_question": "Question q1?",
+        "query": "tariff",
+        "type": "lite",
+        "numResults": 10,
+        "contents": {
+            "text": {"maxCharacters": research.SEARCH_TEXT_MAX_CHARS},
+            "highlights": True,
+        },
+        "includeDomains": ["gob.pe"],
     }
-    assert search_calls[0]["headers"] == {"Authorization": f"Bearer {KEY}"}
+    assert search_calls[0]["headers"] == {"x-api-key": KEY}
 
 
-def test_ori_question_is_truncated_at_a_word_boundary(tmp_path, monkeypatch, capsys):
+def test_long_query_is_not_truncated(tmp_path, monkeypatch, capsys):
+    long_query = "query one " + " ".join(["abcdefghij"] * 20)
+    assert len(long_query) > 128
     fixture = mock_fixture(tmp_path, [
         {"contains": "query one", "responses": [search_ok([])]},
     ])
     use_sdk(monkeypatch, fixture)
     calls = capture_http(monkeypatch)
-    plan = plan_of(("q1", ["query one"]))
-    plan["subquestions"][0]["question"] = " ".join(["abcdefghij"] * 20)
-    work = make_work(tmp_path, plan)
+    work = make_work(tmp_path, plan_of(("q1", [long_query])))
 
     code, _out, err = run_cli(["search", "--work", str(work)], capsys)
     assert code == 0, err
-    ori = calls[0]["payload"]["ori_question"]
-    assert 0 < len(ori) <= research.DEEPSEEK_MAX_QUERY_CHARS
-    assert all(len(word) == 10 for word in ori.split(" "))
-    assert not ori.endswith(" ")
-    assert "at most 128" in err
+    assert calls[0]["payload"]["query"] == long_query
 
 
-def test_fragment_stripping_dedupes_and_cost(tmp_path, monkeypatch, capsys):
+def test_dedupe_highlights_and_cost(tmp_path, monkeypatch, capsys):
     fixture = mock_fixture(tmp_path, [
-        {"contains": "site:gob.pe",
+        {"contains": "tariff",
          "responses": [search_ok([
-             hit("https://shared.example/a/#1", title="Shared", summary="Summary one.",
-                 content="Full content one.", published="2025-03-04T10:00:00Z",
-                 authority=3, rerank=2.5),
+             {
+                 "url": "https://shared.example/a/#1",
+                 "title": "Shared",
+                 "publishedDate": "2025-03-04T10:00:00Z",
+                 "highlights": ["Summary one.", "More detail."],
+                 "text": "Full content one.",
+             },
              hit("https://second.example/b#1#1", title="Second"),
          ])]},
         {"contains": "query two",
@@ -1082,31 +1085,32 @@ def test_fragment_stripping_dedupes_and_cost(tmp_path, monkeypatch, capsys):
     registry = load_sources(work)
     by_url = {src["url"]: src for src in registry["sources"]}
     assert set(by_url) == {
-        "https://shared.example/a/", "https://second.example/b", "https://third.example/c",
+        "https://shared.example/a/#1",
+        "https://second.example/b#1#1",
+        "https://third.example/c",
     }
-    assert all("#" not in url for url in by_url)
-    shared = by_url["https://shared.example/a/"]
+    shared = by_url["https://shared.example/a/#1"]
     assert shared["id"] == "S1"
     assert shared["subquestions"] == ["q1", "q2"]
-    assert shared["summary"] == "Summary one."
+    assert shared["summary"] == "Summary one. More detail."
     assert shared["text"] == "Full content one."
     assert shared["published"] == "2025-03-04T10:00:00Z"
-    assert shared["authority"] == 3
-    assert shared["rerank"] == 2.5
-    # two searches, both with results: flat per-request cost
-    assert registry["cost_dollars"] == pytest.approx(2 * research.DEEPSEEK_USD_PER_REQUEST)
-    assert "run cost: $0.0015" in out
+    assert "authority" not in shared
+    assert "rerank" not in shared
+    # two searches: cost comes from each response's costDollars.total
+    assert registry["cost_dollars"] == pytest.approx(2 * SEARCH_COST)
+    assert "run cost: $0.0100" in out
     events = [json.loads(line) for line in
               (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
-    assert {event["provider"] for event in events} == {"deepseek"}
+    assert {event["provider"] for event in events} == {"exa"}
     assert sum(event["cost"] for event in events) == pytest.approx(
-        2 * research.DEEPSEEK_USD_PER_REQUEST
+        2 * SEARCH_COST
     )
 
 
 def test_empty_results_cost_zero(tmp_path, monkeypatch, capsys):
     fixture = mock_fixture(tmp_path, [
-        {"contains": "empty query", "responses": [search_ok([])]},
+        {"contains": "empty query", "responses": [search_ok([], cost=0.0)]},
     ])
     use_sdk(monkeypatch, fixture)
     work = make_work(tmp_path, plan_of(("q1", ["empty query"])))
@@ -1239,7 +1243,7 @@ def test_fetch_uses_cache_without_network(tmp_path, monkeypatch, capsys):
     write_registry(work, [source("S1", "https://one.example/a")])
     (work / "pages" / "S1.md").write_text("CACHED PAGE TEXT", encoding="utf-8")
     monkeypatch.setenv(research.MOCK_ENV, str(mock_fixture(tmp_path, [])))
-    monkeypatch.setenv(research.DEEPSEEK_KEY_ENV, KEY)
+    monkeypatch.setenv(research.EXA_KEY_ENV, KEY)
 
     def explode(*_args, **_kwargs):
         raise AssertionError("fetch must not hit the network when a page is cached")
@@ -1305,9 +1309,12 @@ def test_fetch_stores_full_page_and_cost(tmp_path, monkeypatch, capsys):
         ["fetch", "--work", str(work), "--id", "S1", "--max-chars", "500"], capsys
     )
     assert code == 0, err
-    assert [call["url"] for call in calls] == [research.DEEPSEEK_FETCH_URL]
-    assert calls[0]["payload"] == {"url": "https://one.example/a"}
-    assert calls[0]["headers"] == {"Authorization": f"Bearer {KEY}"}
+    assert [call["url"] for call in calls] == [research.EXA_CONTENTS_URL]
+    assert calls[0]["payload"] == {
+        "urls": ["https://one.example/a"],
+        "text": {"maxCharacters": research.PAGE_MAX_CHARS},
+    }
+    assert calls[0]["headers"] == {"x-api-key": KEY}
     assert "FULL PAGE" in out
     # --max-chars limits the print, not the cache
     assert out.count("FULL PAGE") < 2000
@@ -1316,12 +1323,12 @@ def test_fetch_stores_full_page_and_cost(tmp_path, monkeypatch, capsys):
     assert len(page) == len(content)
     registry = load_sources(work)
     assert len(registry["sources"][0]["text"]) == research.TEXT_MAX_CHARS
-    assert registry["cost_dollars"] == pytest.approx(research.DEEPSEEK_USD_PER_REQUEST)
+    assert registry["cost_dollars"] == pytest.approx(CONTENTS_COST)
     events = [json.loads(line) for line in
               (work / research.LOG_FILE).read_text(encoding="utf-8").splitlines()]
     assert events[-1]["op"] == "fetch"
-    assert events[-1]["provider"] == "deepseek"
-    assert events[-1]["cost"] == pytest.approx(research.DEEPSEEK_USD_PER_REQUEST)
+    assert events[-1]["provider"] == "exa"
+    assert events[-1]["cost"] == pytest.approx(CONTENTS_COST)
 
 
 def test_fetch_url_registers_new_source_and_evidence(tmp_path, monkeypatch, capsys):
@@ -1346,7 +1353,7 @@ def test_fetch_url_registers_new_source_and_evidence(tmp_path, monkeypatch, caps
     assert (work / "pages" / "S2.md").read_text(encoding="utf-8") == "Registered page body"
     assert "[S2]" in (work / "evidence" / "q1.md").read_text(encoding="utf-8")
     assert "Registered page body" in out
-    assert registry["cost_dollars"] == pytest.approx(research.DEEPSEEK_USD_PER_REQUEST)
+    assert registry["cost_dollars"] == pytest.approx(CONTENTS_COST)
 
 
 def test_fetch_url_requires_subq(tmp_path, capsys):

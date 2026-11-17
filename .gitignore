@@ -4,5 +4,5 @@ __pycache__/
 .pytest_cache/
 evals/.env
 evals/.run/
-evals/results/
+evals/results
 evals/topics.local.json

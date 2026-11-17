@@ -12,9 +12,9 @@ version: 1.0.0
 author: ramzacc
 platforms: [linux, macos]
 required_environment_variables:
-  - name: DEEP_RESEARCH_DEEPSEEK_KEY
-    prompt: DeepSeek API key for search and page fetching
-    help: Set it with `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <key>`.
+  - name: DEEP_RESEARCH_EXA_KEY
+    prompt: Exa API key for search and page fetching
+    help: Set it with `hermes config set DEEP_RESEARCH_EXA_KEY <key>`.
     required_for: web search and page fetching
 metadata:
   hermes:
@@ -130,7 +130,7 @@ Rules:
 - If the request is a comparison or a "which should I choose" question, give each option its
   own angle (features, costs, constraints, trade-offs) instead of adding an execution or
   recommendation subquestion. The report explains the choice; it does not make it.
-- 4-6 queries per subquestion, each 128 characters or fewer. Make them diverse: (a) plain
+- 4-6 queries per subquestion. Make them diverse: (a) plain
   question phrasing, (b) a synonym or alternate-language phrasing (English plus the user's
   language when the topic is local), (c) one official/primary query using `site:` on the
   relevant government, university or official domain or country TLD (e.g.
@@ -141,10 +141,9 @@ Rules:
   tariffs, deadlines or availability, one query naming the current month and year in the
   user's language (e.g. `tarifa luz noviembre 2026`, `precio balon gas noviembre 2026`) to
   catch recent news. Never repeat the same query twice.
-- Operators that work in DeepSeek search: `site:`, `-site:`, `"exact phrase"`, `lang:`,
-  `after:`. Use `after:` only for news-type queries, never together with `lang:` (that
-  combination returns nothing), and remember it drops undated official documents. Do not use
-  `after:` to get freshness: name the current month and year instead.
+- `site:` works: it is sent to Exa as an `includeDomains` filter, so `site:gob.pe ...` or
+  `site:.pe ...` restricts the search to that domain or country TLD. Exa does not support
+  `lang:` or `after:`; do not use them. For freshness, name the current month and year.
 
 Filled-in example (3 of 4+ subquestions shown):
 
@@ -195,8 +194,8 @@ python3 ${HERMES_SKILL_DIR}/scripts/research.py search --work <WORK>
 
 This runs every query in parallel, dedupes URLs, assigns stable `S#` ids, writes
 `<WORK>/sources.json`, and writes `<WORK>/evidence/<qid>.md` per subquestion. Each request
-asks for 20 results and sends the subquestion text as `ori_question`; the full page of every
-result is cached in `<WORK>/pages/<S#>.md`, so `fetch` usually costs nothing.
+asks for 10 results; the page text of every result is cached in `<WORK>/pages/<S#>.md`, so
+`fetch` usually costs nothing.
 
 Check the printed summary:
 - `queries: X ok, Y failed` — note failed queries; they are skipped, not fatal.
@@ -233,11 +232,11 @@ context: |
 
   STEP 1 — Read <WORK>/evidence/<QID>.md (a digest of candidate sources with stable S-ids).
   It quotes the passages of each page that best match this subquestion, and lists weaker
-  candidates as one-liners you can still fetch. Sources are ranked by DeepSeek rerank plus a
-  recency bonus (a 90-day-old page gets +0.6, an old undated PDF can get -0.5), so an official
-  2021 PDF does not outrank this month's notice. The tags `social/forum`, `low-authority` and
-  `possibly-outdated` mark weak sources: use them as leads, never as the only support for a
-  number, and check freshness with `recent --grep` before using a value.
+  candidates as one-liners you can still fetch. Sources are ranked by a recency bonus plus
+  their date (Exa lite returns no authority or rerank scores), so an official 2021 PDF does
+  not outrank this month's notice. The tags `social/forum` and `possibly-outdated` mark weak
+  sources: use them as leads, never as the only support for a number, and check freshness
+  with `recent --grep` before using a value.
 
   STEP 2 — Follow-up research: at most 6 search calls. Fetch at least 3 and at most 8 pages
   total (fetch is cheap — cached pages are free):
@@ -261,11 +260,11 @@ context: |
         it (`--grep` the value) and use the newest official value, recording its `as_of` date.
         If nothing newer is registered, run one search naming the current month and year (e.g.
         "tarifa luz noviembre 2026"). An older official PDF is not the current value, however
-        high its authority or rerank score.
-    (d) if the only source is tagged social/forum or low-authority, corroborate it with a
-        second independent source or set `confidence` to "low".
-  Prefer authority >= 3 and official/primary pages. A forum post, Q&A page, social media,
-  WeChat, LinkedIn or a blog never settles a price, requirement or deadline on its own.
+        official it looks.
+    (d) if the only source is tagged social/forum, corroborate it with a second independent
+        source or set `confidence` to "low".
+  Prefer official/primary pages. A forum post, Q&A page, social media, WeChat, LinkedIn or a
+  blog never settles a price, requirement or deadline on its own.
 
   STEP 3 — Answer the subquestion. Use ONLY facts present in the evidence file or in pages
   you fetched. Cite with S-ids that appear in those outputs. If sources conflict, record the
@@ -344,7 +343,7 @@ synthesize. Do not skip it silently.
    - value-bearing findings (prices, fees, tariffs, requirements, eligibility, deadlines)
      with `verified: false` or `confidence: "low"`,
    - asks in `plan.json` whose coverage is thin: no number where a number is needed, one weak
-     source, or only social/forum/low-authority support.
+     source, or only social/forum support.
 2. Pick the top ≤8 items by how much they change the answer; skip cosmetic ones.
 3. Staleness audit (mandatory): for every value that will appear in Summary or in a comparison
    table,
@@ -518,10 +517,10 @@ skipped as duplicates), and `finalize` is repeatable.
 
 ## Failure handling
 
-- `DEEP_RESEARCH_DEEPSEEK_KEY is not set` → tell the user to run
-  `hermes config set DEEP_RESEARCH_DEEPSEEK_KEY <their key>` and re-run. Do not fake results.
+- `DEEP_RESEARCH_EXA_KEY is not set` → tell the user to run
+  `hermes config set DEEP_RESEARCH_EXA_KEY <their key>` and re-run. Do not fake results.
 - `HTTP 401/403` → the key is invalid or exhausted. Report it; do not retry in a loop.
-- `HTTP 402` → insufficient DeepSeek balance; tell the user to top up. Do not retry.
+- `HTTP 402` → insufficient Exa balance; tell the user to top up. Do not retry.
 - `HTTP 429/5xx` → the script already retried 3 times with backoff. Re-run the same
   command once; if it still fails, tell the user which queries failed and continue with
   the sources already on disk.
@@ -535,7 +534,7 @@ skipped as duplicates), and `finalize` is repeatable.
 - `fetch --grep` prints `no matches for: ...` and exits 1 → the value is not on that page.
   Do not cite it from that source; find the page that states it.
 - Empty results → broaden wording, remove quotes/jargon, add a `site:` or country-TLD
-  variant (do not add `after:` to official-document queries).
+  variant; there is no `after:` operator, so name the current month and year instead.
 - `delegate_task` error or no results message → do the subquestions yourself sequentially
   (step 4 fallback), then continue.
 - A post-action tool is missing or fails → do not stop; report that item as failed in the final
@@ -543,13 +542,12 @@ skipped as duplicates), and `finalize` is repeatable.
 
 ## Budget defaults
 
-- 4-8 subquestions, 4-6 queries each (≤128 chars), 20 results per query (search is billed per
-  request, so 20 costs the same as 8), 6000 chars per source in `sources.json` plus the full
-  page cached in `pages/`.
+- 4-8 subquestions, 4-6 queries each, 10 results per query (Exa lite's base price covers up
+  to 10), 6000 chars per source in `sources.json` plus the page text cached in `pages/`.
 - Per subquestion researcher: max 6 follow-up search calls (≤3 queries each) and 3-8 fetched
   pages. Cached pages cost nothing, so fetch aggressively. `recent` is local and free: use it
   for every freshness check.
-- Typical run: 24-48 searches in step 3 plus ≤48 follow-ups and ≤8 gap-round searches. At
-  $0.00075 per request that is about $0.10 per report. The script prints run and cumulative
-  `cost` — include it in `## Methodology` when it is above $0.10.
+- Typical run: 24-48 searches in step 3 plus ≤48 follow-ups and ≤8 gap-round searches. Exa
+  bills per request; the script prints run and cumulative `cost` — include it in
+  `## Methodology` when it is above $0.50.
 - Do not raise `--workers` above 10 (provider rate limits).
