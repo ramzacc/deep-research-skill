@@ -73,9 +73,9 @@ DEFAULT_MAX_CHARS = TEXT_MAX_CHARS
 # Search backend: "exa" (default) or "serper".
 SEARCH_PROVIDER_ENV = "DEEP_RESEARCH_SEARCH_PROVIDER"
 DEFAULT_SEARCH_PROVIDER = "exa"
-# Exa /search type: "auto" (default) or the cheaper "lite".
+# Exa /search type: "lite" (default, cheaper) or "auto".
 EXA_TYPE_ENV = "DEEP_RESEARCH_EXA_TYPE"
-DEFAULT_EXA_TYPE = "auto"
+DEFAULT_EXA_TYPE = "lite"
 # Serper mode: Exa /contents fetches the top N new results per query for page text.
 CONTENT_TOP_ENV = "DEEP_RESEARCH_CONTENT_TOP"
 DEFAULT_CONTENT_TOP = 5
@@ -376,13 +376,13 @@ def search_provider() -> str:
 
 
 def exa_search_type() -> str:
-    """Exa /search type: DEEP_RESEARCH_EXA_TYPE, then "auto"."""
+    """Exa /search type: DEEP_RESEARCH_EXA_TYPE, then "lite"."""
     raw = os.environ.get(EXA_TYPE_ENV, "").strip().lower()
     if not raw:
         return DEFAULT_EXA_TYPE
     if raw not in ("auto", "lite"):
         die(
-            f"error: {EXA_TYPE_ENV}={raw!r} is invalid; choose 'auto' (default) or 'lite'.",
+            f"error: {EXA_TYPE_ENV}={raw!r} is invalid; choose 'lite' (default) or 'auto'.",
             2,
         )
     return raw

@@ -997,7 +997,7 @@ def use_serper(monkeypatch, fixture: Path) -> None:
     monkeypatch.delenv(research.EXA_TYPE_ENV, raising=False)
 
 
-def test_exa_default_payload_is_unchanged(monkeypatch):
+def test_exa_default_payload_uses_lite(monkeypatch):
     monkeypatch.delenv(research.EXA_TYPE_ENV, raising=False)
     monkeypatch.delenv(research.SEARCH_PROVIDER_ENV, raising=False)
     captured: dict = {}
@@ -1011,7 +1011,7 @@ def test_exa_default_payload_is_unchanged(monkeypatch):
     assert captured["url"] == research.EXA_SEARCH_URL
     assert captured["payload"] == {
         "query": "plain query",
-        "type": "auto",
+        "type": "lite",
         "numResults": 8,
         "contents": {"text": {"maxCharacters": 6000}, "highlights": True},
     }
@@ -1022,7 +1022,7 @@ def test_exa_default_payload_is_unchanged(monkeypatch):
 
 def test_exa_type_env_and_site_tokens(monkeypatch):
     monkeypatch.delenv(research.SEARCH_PROVIDER_ENV, raising=False)
-    monkeypatch.setenv(research.EXA_TYPE_ENV, "lite")
+    monkeypatch.setenv(research.EXA_TYPE_ENV, "auto")
     captured: dict = {}
 
     def fake_post(url, payload, api_key=None, timeout=45.0, headers=None):
@@ -1031,7 +1031,7 @@ def test_exa_type_env_and_site_tokens(monkeypatch):
 
     monkeypatch.setattr(research, "http_post_json", fake_post)
     research.exa_search("foo site:gob.pe bar site:edu.pe", 5, 2000, "key")
-    assert captured["type"] == "lite"
+    assert captured["type"] == "auto"
     assert captured["query"] == "foo bar"
     assert captured["includeDomains"] == ["gob.pe", "edu.pe"]
 

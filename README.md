@@ -160,7 +160,7 @@ Production knobs:
   Google via Serper, stores the snippet as each source's highlight, then fetches page text
   for the top new results with Exa `/contents`.
 - `DEEP_RESEARCH_SERPER_KEY` — Serper API key; required when the provider is `serper`.
-- `DEEP_RESEARCH_EXA_TYPE` — Exa `/search` type: `auto` (default) or the cheaper `lite`.
+- `DEEP_RESEARCH_EXA_TYPE` — Exa `/search` type: `lite` (default, about half the cost of `auto`, same report quality in blind evals) or `auto`.
 - `DEEP_RESEARCH_CONTENT_TOP` — in Serper mode, page texts fetched per query (default 5;
   `0` disables content fetching, leaving snippet-only sources).
 
