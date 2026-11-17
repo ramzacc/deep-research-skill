@@ -25,8 +25,10 @@ metadata:
 
 # Deep research
 
-You produce a cited report that a careful analyst would accept. Work is done in a fixed
-work dir by `${HERMES_SKILL_DIR}/scripts/research.py`, and by delegated researchers.
+You produce a cited report that maps a topic and reports the evidence: the landscape, what
+sources say, how strong that evidence is, and the trade-offs between the options. The user
+decides. Work is done in a fixed work dir by `${HERMES_SKILL_DIR}/scripts/research.py`, and by
+delegated researchers.
 
 **Outputs**
 - `~/research/<slug>.md` — final report with numbered, linked citations and References,
@@ -48,6 +50,10 @@ work dir by `${HERMES_SKILL_DIR}/scripts/research.py`, and by delegated research
 7. A proper name (person, group, lab, program, scholarship, product) may appear in the report
    only if it appears literally in an evidence excerpt or a fetched page. Otherwise leave it
    out, or list it under Not verified.
+8. Neutral by design. Report the options, the evidence and the trade-offs; never recommend one
+   option, rank them as "best", or write step-by-step action plans or "do X by <date>"
+   instructions. If the user asks "which should I choose", explain what the evidence supports
+   on each side and what would tip the balance; the user decides.
 
 ---
 
@@ -118,13 +124,12 @@ Rules:
   allowed only for a pure identification subquestion.
 - 4-8 subquestions, ids `q1`..`q8` in order, unique.
 - Each subquestion covers a DIFFERENT angle. Use this menu: background/definitions;
-  current state and timeline; key players/companies/institutions; data and numbers;
-  evidence and case studies; criticisms, risks and counter-evidence; recent developments
-  (last 12 months); outlook and competing forecasts.
-- If the request is a decision (choose, buy, apply, move, start, compare options to act on),
-  make the LAST subquestion an execution subquestion: "What does acting on the best options
-  require for this user: steps and paperwork, timeline, total cost, main risks and a plan B?"
-  It covers the asks about the decision itself. Skip it for purely informational requests.
+  current state; key players/options; data and numbers; evidence and case studies; debates,
+  criticisms and counter-evidence; recent developments (last 12 months); outlook and competing
+  forecasts.
+- If the request is a comparison or a "which should I choose" question, give each option its
+  own angle (features, costs, constraints, trade-offs) instead of adding an execution or
+  recommendation subquestion. The report explains the choice; it does not make it.
 - 4-6 queries per subquestion, each 128 characters or fewer. Make them diverse: (a) plain
   question phrasing, (b) a synonym or alternate-language phrasing (English plus the user's
   language when the topic is local), (c) one official/primary query using `site:` on the
@@ -245,7 +250,7 @@ context: |
   fetch it instead of searching again. Follow-up searches are concurrency-safe; use the new
   S-ids they print.
 
-  MANDATORY for every price, fee, tariff, deadline, requirement or decision-critical number:
+  MANDATORY for every price, fee, tariff, deadline, requirement or other value-bearing number:
     (a) fetch the cited page with `--grep` for the value and confirm it in the full text.
         `no matches` means the value is NOT on that page: fix the source or drop the claim.
     (b) record the unit and pack size exactly as the page states it — per unit, per box of N,
@@ -265,8 +270,9 @@ context: |
   STEP 3 — Answer the subquestion. Use ONLY facts present in the evidence file or in pages
   you fetched. Cite with S-ids that appear in those outputs. If sources conflict, record the
   conflict instead of picking a side silently. If evidence is missing, say so in gaps.
-  For every date, set date_status relative to today: "open", "past" or "unknown". Never
-  present a past deadline as actionable; if the sources show the next cycle, give it.
+  Report values with their `as_of` date and unit; report dates as the source states them,
+  without turning them into instructions. `date_status` is optional: use it only when a source
+  is explicit about a deadline being open or already past.
   Proper names: include a person/group/lab/program/scholarship/product only if it appears
   literally in the evidence file or a fetched page. Otherwise omit it or put it in gaps.
 
@@ -275,15 +281,15 @@ context: |
    "question": "<QUESTION>",
    "answer_summary": "3-6 sentences answering the subquestion, each claim followed by its S-id citation",
    "findings": [{"claim": "one verifiable fact with a number/date/name", "source_ids": ["S3"],
-                 "confidence": "high", "verified": true, "date_status": "open",
+                 "confidence": "high", "verified": true,
                  "as_of": "2026-11", "unit": "S/ per kWh, incl. IGV"}],
    "contradictions": ["source A says X [S4] while source B says Y [S9]"],
    "gaps": ["what could not be established and why"]}
 
   Rules for the JSON: 3-8 findings; source_ids are S-ids only, never URLs; confidence is
   exactly "high", "medium" or "low"; verified is true only when the claim was confirmed with
-  `fetch --grep` in the fetched full text, false otherwise; date_status is required on date
-  claims and is exactly "open", "past" or "unknown" (omit it for non-date claims); as_of is
+  `fetch --grep` in the fetched full text, false otherwise; date_status is optional and, when
+  present, is exactly "open", "past" or "unknown"; as_of is
   required on every finding that carries a value (price, fee, quantity, rate, deadline) and is
   "YYYY-MM", "YYYY-MM-DD" or "unknown" — the date the value is valid as of, from the page;
   unit is required when the claim has a price or quantity and repeats the page's wording
@@ -335,12 +341,13 @@ synthesize. Do not skip it silently.
 1. Read all `<WORK>/findings/*.json` and list:
    - gaps the researchers reported,
    - contradictions between findings,
-   - decision-critical findings (prices, fees, tariffs, requirements, eligibility, deadlines)
+   - value-bearing findings (prices, fees, tariffs, requirements, eligibility, deadlines)
      with `verified: false` or `confidence: "low"`,
    - asks in `plan.json` whose coverage is thin: no number where a number is needed, one weak
      source, or only social/forum/low-authority support.
 2. Pick the top ≤8 items by how much they change the answer; skip cosmetic ones.
-3. Staleness audit (mandatory): for every value that will appear in Summary or What to do,
+3. Staleness audit (mandatory): for every value that will appear in Summary or in a comparison
+   table,
    run `python3 ${HERMES_SKILL_DIR}/scripts/research.py recent --work <WORK> --grep "<value>" "<thing>"`
    and read the newest rows. If a newer source contradicts the finding, fetch it and resolve
    the conflict (update `claim`, `source_ids`, `as_of`) before synthesis. Recency beats
@@ -370,23 +377,28 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
 4. Required structure, in this order:
    - Title (concrete, not "Research Report") + the date and research-question line.
    - `## Summary` / `## Resumen`: at most 6 bullets, strongest first, each ending in `[S#]`.
-   - 3-7 thematic `##` sections: the general picture, organized by theme or option. Cover the
-     asks in plan.json; do not add topics nobody asked for.
-   - `## Disagreements & uncertainties` / `## Contradicciones e incertidumbres`: contradictions
-     from the findings files, cited on both sides; also low-confidence claims.
+   - 3-7 thematic `##` sections: the landscape, organized by theme or option. Cover the asks
+     in plan.json; do not add topics nobody asked for. Comparisons go in tables.
+   - `## Debates and evidence strength` / `## Debates y solidez de la evidencia`: where sources
+     disagree (both sides cited) and which claims rest on several strong sources versus a
+     single weak one.
+   - `## Implications` / `## Implicaciones`: what the evidence means for the user's question
+     and context. Put the options and their trade-offs side by side (a table when there are
+     several), state what would tip the balance either way, and stay neutral: no
+     recommendation, no ranking of "best", no dated to-do list.
+   - `## Open questions` / `## Preguntas abiertas`: what the evidence could not settle and what
+     evidence would settle it.
    - `## Not verified` / `## No verificado`: every claim used with `verified: false`, plus the
      reason it could not be confirmed.
-   - `## What to do` / `## Qué hacer`: the actionable conclusion. Numbered concrete steps
-     tailored to `user_context`, each with its date or deadline (open ones only), plus a short
-     shortlist or decision table. Every step has a `[S#]` citation.
-   - `## Assumptions` / `## Supuestos`: required whenever the report computes anything. A table
-     with each input, value, unit and source id (or "assumption"/"supuesto" and why). Use ONE
+   - `## Assumptions` / `## Supuestos`: only when the report computes anything. A table with
+     each input, value, unit and source id (or "assumption"/"supuesto" and why). Use ONE
      exchange rate, cited, everywhere; cost totals must list every component.
    - `## Methodology` / `## Metodología`: real counts (subquestions, sources, queries), the
      search spend the script printed, and today.
+   Do not add a What to do / Qué hacer section or step-by-step action plan; the user decides.
 5. Rules for every section: every factual paragraph has at least one `[S#]`; no uncited
    numbers; put the citation where the claim is, not only at the end. Prefer tables over
-   prose: whenever you compare options, amounts, requirements, deadlines, steps or risks, put
+   prose: whenever you compare options, amounts, requirements, deadlines or risks, put
    them in a markdown table (one row per option, one column per attribute, citations inside
    the cells) and keep the prose around it to 1-3 sentences that say what the table means.
    Do not pad: a typical report is 4,000-7,000 words. Do not leave HTML comments in the body. Do
@@ -404,18 +416,18 @@ cp ${HERMES_SKILL_DIR}/templates/report.md <WORK>/draft.md
    - **One fact, one value.** If the same fact appears with two values (a fee, a requirement,
      an eligibility rule), keep the best-sourced one everywhere, or explain the conflict in
      Disagreements.
-   - **Act on current facts only.** Every time-sensitive fact used in What to do (a person's
-     current affiliation, a price, a deadline, a requirement, availability) must come from a
-     page you fetched in this run and that shows it is current. If not, fetch the current page
-     (`fetch` costs almost nothing) or drop the step.
+   - **Report current values.** Every time-sensitive fact used in Summary, a comparison table
+     or Implications (a person's current affiliation, a price, a deadline, a requirement,
+     availability) must come from a page you fetched in this run and that shows it is current.
+     If not, fetch the current page (`fetch` costs almost nothing) or drop the value.
    - **Units and pack sizes match the source.** If the page says "S/ 14.90 per box of 12", the
      report says per box, not per unit; if it says "per month", do not present it as per year.
      Never convert, divide or multiply without `≈` and a cited input. State the currency and
      whether tax is included, exactly as the page does.
-   - **Every value in What to do has an as_of date and the newest official source.** Check
-     each value against its finding's `as_of`; if a newer official value exists (a newer
-     tariff, fee schedule, regulation or price list), use it everywhere the old one appeared
-     and note the "as of" date in the step.
+   - **Every value in Summary, comparison tables and Implications has an as_of date and the
+     newest official source.** Check each value against its finding's `as_of`; if a newer
+     official value exists (a newer tariff, fee schedule, regulation or price list), use it
+     everywhere the old one appeared and state the "as of" date next to it.
 
 ## Step 6 — Finalize
 
@@ -436,23 +448,23 @@ Success prints `report: /abs/path`, a citation count and coverage. Fix and repea
 - `error: the draft mentions source ids outside a citation bracket` → the listed lines have a
   bare `S476` (often a table column). Change each to `[S476]`, or drop the text.
 - `error: the draft is missing required sections` → add the listed sections in the report
-  language (`Summary`/`Resumen`, `What to do`/`Qué hacer`, `Not verified`/`No verificado`)
+  language (`Summary`/`Resumen`, `Implications`/`Implicaciones`, `Not verified`/`No verificado`)
   and re-run.
 - `warning: report is ... words` → cut padding; a typical report is 4,000-7,000 words.
-- `warning: line ... mentions a deadline date in the past` → do not present it as actionable;
-  mark it `date_status: "past"`, and give the next cycle only if a source shows one.
+- `warning: line ... mentions a deadline that has passed` → informational: check that the
+  report states the date as the source does and does not present it as the current value.
 - `warning: N cited sentence(s)/cell(s) contain numbers not found in the sources they cite`
-  → for each listed line, starting with Summary and What to do: if it is your calculation,
+  → for each listed line, starting with Summary and Implications: if it is your calculation,
   mark it with `≈` and cite its inputs; if it is a fact, find the source that contains it and
   cite that one, or fetch the cited page to check the current value; if no source has it,
   move it to Not verified. Re-run finalize once; a few remaining warnings are acceptable.
 - `warning: only ...% of body paragraphs contain a citation` → add citations to the weak
   paragraphs (the report is still written; do not ignore this).
-- `warning: N Summary/What-to-do sentence(s)/cell(s) cite only social/forum or low-authority
-  sources` → the decision rests on weak support. Search for an official/primary source and
+- `warning: N Summary/Implications sentence(s)/cell(s) cite only social/forum or low-authority
+  sources` → that claim rests on weak support. Search for an official/primary source and
   fetch it, then cite that; if none exists, mark the claim `confidence: "low"` and say so in
-  Disagreements or Not verified. Do not leave a price, requirement or deadline on a forum
-  post, Q&A page, social media, WeChat, LinkedIn or blog alone.
+  Debates and evidence strength or Not verified. Do not leave a price, requirement or deadline
+  on a forum post, Q&A page, social media, WeChat, LinkedIn or blog alone.
 
 ## Step 7 — Post-actions
 
@@ -481,8 +493,9 @@ Report: ~/research/<SLUG>.md (attached)
 MEDIA:/absolute/path/to/<SLUG>.md
 ```
 
-For every item in `plan.json` `post_actions`, say `done` or `failed — <reason>`; omit the
-Post-actions block when the list is empty. The gateway attaches the Markdown report as a document
+Do not add recommendations, next steps or an action plan to the reply; the report explains the
+trade-offs and the user decides. For every item in `plan.json` `post_actions`, say `done` or
+`failed — <reason>`; omit the Post-actions block when the list is empty. The gateway attaches the Markdown report as a document
 on Telegram because of the `MEDIA:` line.
 Use an absolute path: run `realpath ~/research/<SLUG>.md` and put that path on the `MEDIA:` line,
 one line, no backticks and no other text after it. Always include the MEDIA line, even in a
@@ -516,8 +529,9 @@ skipped as duplicates), and `finalize` is repeatable.
   affected a subquestion.
 - `plan.json is invalid` → fix exactly the printed lines (asks, covers, identify/q1);
   `--dry-run` until clean.
-- `findings shape` warnings from `status` → add `verified` to every finding, `date_status`
-  on date claims, `as_of`/`unit` on value claims, and real S-ids; rewrite that file.
+- `findings shape` warnings from `status` → add `verified` to every finding, `as_of`/`unit`
+  on value claims, `date_status` only when a source is explicit, and real S-ids; rewrite that
+  file.
 - `fetch --grep` prints `no matches for: ...` and exits 1 → the value is not on that page.
   Do not cite it from that source; find the page that states it.
 - Empty results → broaden wording, remove quotes/jargon, add a `site:` or country-TLD

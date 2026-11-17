@@ -3,8 +3,12 @@
 *<YYYY-MM-DD> · <Research question / Pregunta de investigación>: "<the user's question, verbatim>"*
 
 <!-- WRITE THE TITLE AND EVERY HEADING IN THE LANGUAGE OF THE USER'S REQUEST.
-     English headings: Summary · Disagreements & uncertainties · Not verified · What to do · Assumptions · Methodology
-     Spanish headings: Resumen · Contradicciones e incertidumbres · No verificado · Qué hacer · Supuestos · Metodología
+     English headings: Summary · Debates and evidence strength · Implications · Open questions ·
+     Not verified · Assumptions · Methodology
+     Spanish headings: Resumen · Debates y solidez de la evidencia · Implicaciones ·
+     Preguntas abiertas · No verificado · Supuestos · Metodología
+     This is a reporting skill: explain the landscape, the evidence and the trade-offs. Never
+     recommend an option, rank one as best, or write an action plan.
      No padding; typically 4,000-7,000 words. Do not add a References/Referencias section;
      finalize adds it. -->
 
@@ -20,37 +24,38 @@
 
 <!-- 3-7 thematic sections total. Organize by THEME or OPTION, not one section per
      subquestion, and cover the asks in plan.json. No padding beyond those asks.
-     Every factual paragraph needs at least one [S#] citation. -->
+     Every factual paragraph needs at least one [S#] citation. Comparisons go in tables,
+     one row per option, one column per attribute, citations inside the cells. -->
 
 ## <Theme 2>
 
 ## <Theme 3>
 
-## Disagreements & uncertainties
+## Debates and evidence strength
 
-<!-- What sources disagree on, where evidence is thin, what could not be verified.
-     Cite both sides, e.g. [S4] vs [S11]. State your confidence plainly. -->
+<!-- Where sources disagree, with both sides cited (e.g. [S4] vs [S11]). Then say which claims
+     rest on several strong sources and which rest on a single weak one; state confidence
+     plainly. -->
+
+## Implications
+
+<!-- What the evidence means for the user's question and context. Put the options and their
+     trade-offs side by side (a table when there are several), and say what would tip the
+     balance either way. Neutral: no recommendation, no "best" option, no dated to-do list. -->
+
+## Open questions
+
+<!-- What the evidence could not settle, and which source or measurement would settle it. -->
 
 ## Not verified
 
 <!-- Every claim used in the report whose findings entry has verified=false, and why it
      could not be confirmed in fetched full text. Cite the source. -->
 
-## What to do
-
-<!-- The actionable conclusion. Numbered concrete steps tailored to user_context; each step
-     carries its date/deadline (only open ones), its value with the unit and as_of date exactly
-     as the source states them, and a [S#] citation. Add a short shortlist or decision table
-     when the answer is a comparison. -->
-
-1. 
-2. 
-3. 
-
 ## Assumptions
 
-<!-- Required whenever the report computes anything. One row per input. Use ONE exchange
-     rate, cited, everywhere. Cost totals must list every component. -->
+<!-- Only when the report computes anything. One row per input. Use ONE exchange rate,
+     cited, everywhere. Cost totals must list every component. -->
 | input | value | unit | source |
 |---|---|---|---|
 |  |  |  |  |
